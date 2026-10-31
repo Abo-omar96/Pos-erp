@@ -27,8 +27,8 @@
         body { font-family: 'Cairo', sans-serif; }
         @media print {
             body * { visibility: hidden; }
-            #printableArea, #printableArea *, #printableAreaStatement, #printableAreaStatement * { visibility: visible; }
-            #printableAreaStatement { position: absolute; left: 0; top: 0; width: 100%; }
+            #printableArea, #printableArea *, #printableAreaStatement, #printableAreaStatement *, #printableInvoiceReceipt, #printableInvoiceReceipt * { visibility: visible; }
+            #printableAreaStatement, #printableInvoiceReceipt { position: absolute; left: 0; top: 0; width: 100%; }
             .no-print { display: none !important; }
         }
     </style>
@@ -50,10 +50,14 @@
                     <p class="text-xs text-gray-400">نظام إدارة الموارد والأصول (ERP)</p>
                 </div>
             </div>
-            <div class="flex items-center space-x-4 space-x-reverse">
-                <span class="text-xs bg-emerald-700/60 border border-emerald-500 text-emerald-200 px-3 py-1 rounded-full hidden sm:inline-block">
-                    <i class="fa-solid fa-circle-check ml-1"></i> النظام متوازن ومؤمن
-                </span>
+            <div class="flex items-center space-x-3 space-x-reverse">
+                <button onclick="exportBackup()" class="text-xs bg-blue-700 hover:bg-blue-800 text-white px-2.5 py-1.5 rounded transition flex items-center" title="تصدير نسخة احتياطية">
+                    <i class="fa-solid fa-download ml-1"></i> <span class="hidden sm:inline">نسخة احتياطية</span>
+                </button>
+                <label class="text-xs bg-indigo-700 hover:bg-indigo-800 text-white px-2.5 py-1.5 rounded transition cursor-pointer flex items-center" title="استرجاع نسخة احتياطية">
+                    <i class="fa-solid fa-upload ml-1"></i> <span class="hidden sm:inline">استرجاع</span>
+                    <input type="file" id="importFile" accept=".json" onchange="importBackup(event)" class="hidden">
+                </label>
                 <button onclick="resetSystemData()" class="text-xs bg-red-600/80 hover:bg-red-700 text-white px-2.5 py-1.5 rounded transition" title="إعادة تعيين البيانات الافتراضية">
                     <i class="fa-solid fa-rotate-right"></i>
                 </button>
@@ -89,6 +93,9 @@
                 <a href="#" onclick="switchTab('purchases')" class="tab-link flex items-center px-3 py-2.5 rounded-lg hover:bg-gray-800 hover:text-white transition">
                     <i class="fa-solid fa-cart-shopping w-6 ml-2"></i> فواتير المشتريات
                 </a>
+                <a href="#" onclick="switchTab('vouchers')" class="tab-link flex items-center px-3 py-2.5 rounded-lg hover:bg-gray-800 hover:text-white transition">
+                    <i class="fa-solid fa-receipt w-6 ml-2"></i> سندات القبض والصرف
+                </a>
                 <a href="#" onclick="switchTab('journal')" class="tab-link flex items-center px-3 py-2.5 rounded-lg hover:bg-gray-800 hover:text-white transition">
                     <i class="fa-solid fa-book-journal-whills w-6 ml-2"></i> القيود المزدوجة اليومية
                 </a>
@@ -97,7 +104,7 @@
                 </a>
             </nav>
             <div class="p-4 border-t border-gray-800 text-xs text-gray-500 text-center">
-                إصدار الـ ERP المحاسبي 3.8 &copy; 2026
+                إصدار الـ ERP المحاسبي 4.0 &copy; 2026
             </div>
         </aside>
 
@@ -111,7 +118,6 @@
                     <span class="text-xs text-gray-500">تحديث مباشر للحسابات</span>
                 </div>
 
-                <!-- KPI Cards -->
                 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                     <div class="bg-white p-4 rounded-xl shadow-sm border border-gray-200">
                         <div class="flex justify-between items-start">
@@ -158,7 +164,6 @@
                     </div>
                 </div>
 
-                <!-- Quick Actions & System Info -->
                 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
                         <h3 class="font-bold text-gray-800 mb-4 flex items-center"><i class="fa-solid fa-bolt text-amber-500 ml-2"></i> اختصارات سريعة</h3>
@@ -166,8 +171,8 @@
                             <button onclick="switchTab('sales')" class="p-3 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-sm font-semibold text-right transition flex items-center">
                                 <i class="fa-solid fa-cash-register ml-2 text-lg"></i> إصدار فاتورة بيع
                             </button>
-                            <button onclick="switchTab('purchases')" class="p-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg text-sm font-semibold text-right transition flex items-center">
-                                <i class="fa-solid fa-bag-shopping ml-2 text-lg"></i> تسجيل فاتورة شراء
+                            <button onclick="switchTab('vouchers')" class="p-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-lg text-sm font-semibold text-right transition flex items-center">
+                                <i class="fa-solid fa-receipt ml-2 text-lg"></i> سند قبض / صرف
                             </button>
                             <button onclick="switchTab('inventory')" class="p-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg text-sm font-semibold text-right transition flex items-center">
                                 <i class="fa-solid fa-box-open ml-2 text-lg"></i> إضافة صنف MJK جديد
@@ -252,7 +257,7 @@
                 </div>
             </section>
 
-            <!-- 4. PARTNERS (CUSTOMERS & SUPPLIERS) TAB WITH SEARCH -->
+            <!-- 4. PARTNERS (CUSTOMERS & SUPPLIERS) TAB -->
             <section id="tab-partners" class="space-y-6 tab-content hidden">
                 <div class="flex justify-between items-center">
                     <h2 class="text-xl font-bold text-gray-900">سجل العملاء والموردين وكشوف الحسابات</h2>
@@ -265,10 +270,9 @@
                     <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 lg:col-span-1 space-y-3">
                         <h3 class="font-bold text-gray-800 text-sm">دليل العملاء والموردين</h3>
                         
-                        <!-- Search & Filter Header -->
                         <div class="space-y-2">
                             <div class="relative">
-                                <input type="text" id="partnerSearchInput" oninput="renderPartners()" placeholder="بحث باسم العميل أو المورد أو رقم الهاتف..." class="w-full border rounded-lg pr-8 pl-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                <input type="text" id="partnerSearchInput" oninput="renderPartners()" placeholder="بحث بالاسم أو رقم الهاتف..." class="w-full border rounded-lg pr-8 pl-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none">
                                 <i class="fa-solid fa-magnifying-glass absolute right-2.5 top-2.5 text-gray-400 text-xs"></i>
                             </div>
                             <div class="flex gap-1 text-[11px]">
@@ -324,7 +328,7 @@
                                     <th class="p-3">رقم الفاتورة</th>
                                     <th class="p-3">التاريخ</th>
                                     <th class="p-3">العميل</th>
-                                    <th class="p-3">نوع الدفع</th>
+                                    <th class="p-3">طريقة الدفع</th>
                                     <th class="p-3">الإجمالي</th>
                                     <th class="p-3">إجراءات</th>
                                 </tr>
@@ -366,7 +370,36 @@
                 </div>
             </section>
 
-            <!-- 7. JOURNAL ENTRIES TAB -->
+            <!-- 7. CASH RECEIPTS & PAYMENTS VOUCHERS TAB -->
+            <section id="tab-vouchers" class="space-y-6 tab-content hidden">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-xl font-bold text-gray-900">سندات القبض والصرف النقدية</h2>
+                    <button onclick="openModal('voucherModal')" class="bg-primary hover:bg-blue-700 text-white px-3 py-2 rounded-lg text-sm font-semibold shadow transition flex items-center">
+                        <i class="fa-solid fa-plus ml-1.5"></i> سند جديد (قبض / صرف)
+                    </button>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-right text-sm">
+                            <thead class="bg-gray-100 text-gray-700 font-semibold border-b">
+                                <tr>
+                                    <th class="p-3">رقم السند</th>
+                                    <th class="p-3">التاريخ</th>
+                                    <th class="p-3">نوع السند</th>
+                                    <th class="p-3">الجهة (عميل / مورد / مستثمر)</th>
+                                    <th class="p-3">المبلغ</th>
+                                    <th class="p-3">البيان</th>
+                                </tr>
+                            </thead>
+                            <tbody id="vouchersTableBody" class="divide-y divide-gray-200">
+                                <!-- JS Populated -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 8. JOURNAL ENTRIES TAB -->
             <section id="tab-journal" class="space-y-6 tab-content hidden">
                 <div class="flex justify-between items-center">
                     <h2 class="text-xl font-bold text-gray-900">دفتر اليومية العامة والقيود المزدوجة</h2>
@@ -395,7 +428,7 @@
                 </div>
             </section>
 
-            <!-- 8. REPORTS TAB -->
+            <!-- 9. REPORTS TAB -->
             <section id="tab-reports" class="space-y-6 tab-content hidden">
                 <div class="flex justify-between items-center">
                     <h2 class="text-xl font-bold text-gray-900">التقارير المالية والقوائم الختامية</h2>
@@ -405,7 +438,6 @@
                 </div>
 
                 <div id="printableArea" class="space-y-6">
-                    <!-- Trial Balance -->
                     <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
                         <h3 class="font-bold text-gray-800 mb-3 border-b pb-2"><i class="fa-solid fa-scale-balanced ml-2 text-primary"></i> ميزان المراجعة بالأرصدة</h3>
                         <div class="overflow-x-auto">
@@ -426,7 +458,6 @@
                         </div>
                     </div>
 
-                    <!-- Income Statement & Balance Sheet -->
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
                             <h3 class="font-bold text-gray-800 mb-3 border-b pb-2"><i class="fa-solid fa-file-invoice-dollar ml-2 text-emerald-600"></i> قائمة الدخل (الإيرادات والمصروفات)</h3>
@@ -462,9 +493,9 @@
             <i class="fa-solid fa-boxes-stacked text-base"></i>
             <span class="mt-0.5">المخزون</span>
         </button>
-        <button onclick="switchTab('partners')" class="flex flex-col items-center focus:text-blue-400 mobile-nav-btn" data-tab="partners">
-            <i class="fa-solid fa-address-book text-base"></i>
-            <span class="mt-0.5">العملاء</span>
+        <button onclick="switchTab('vouchers')" class="flex flex-col items-center focus:text-blue-400 mobile-nav-btn" data-tab="vouchers">
+            <i class="fa-solid fa-receipt text-base"></i>
+            <span class="mt-0.5">السندات</span>
         </button>
         <button onclick="switchTab('reports')" class="flex flex-col items-center focus:text-blue-400 mobile-nav-btn" data-tab="reports">
             <i class="fa-solid fa-chart-column text-base"></i>
@@ -581,7 +612,7 @@
         </div>
     </div>
 
-    <!-- Sales Invoice Modal with Smart Product Search -->
+    <!-- Sales Invoice Modal -->
     <div id="salesModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3">
@@ -605,13 +636,10 @@
                     </div>
                 </div>
 
-                <!-- Smart Product Search for Sales -->
                 <div class="relative">
                     <label class="block text-xs font-semibold text-gray-600 mb-1">بحث واختيار الصنف (بالكود أو الاسم أو المقاس)</label>
-                    <input type="text" id="salesProductSearch" placeholder="اكتب للبحث (مثال: MJK أو متحرك)..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterSalesProducts()" onfocus="filterSalesProducts()">
-                    <div id="salesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden">
-                        <!-- JS Populated -->
-                    </div>
+                    <input type="text" id="salesProductSearch" placeholder="اكتب للبحث..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterSalesProducts()" onfocus="filterSalesProducts()">
+                    <div id="salesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden"></div>
                     <input type="hidden" id="selectedSalesProductCode">
                 </div>
 
@@ -637,7 +665,7 @@
         </div>
     </div>
 
-    <!-- Purchases Invoice Modal with Smart Product Search -->
+    <!-- Purchases Invoice Modal -->
     <div id="purchasesModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3">
@@ -648,9 +676,7 @@
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">اختر المورد</label>
-                        <select id="purchasesSupplier" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                            <!-- JS populated -->
-                        </select>
+                        <select id="purchasesSupplier" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"></select>
                     </div>
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">طريقة السداد</label>
@@ -661,13 +687,10 @@
                     </div>
                 </div>
 
-                <!-- Smart Product Search for Purchases -->
                 <div class="relative">
-                    <label class="block text-xs font-semibold text-gray-600 mb-1">بحث واختيار صنف الشراء (بالكود أو الاسم أو المقاس)</label>
-                    <input type="text" id="purchasesProductSearch" placeholder="اكتب للبحث (مثال: MJK أو ثابت)..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterPurchasesProducts()" onfocus="filterPurchasesProducts()">
-                    <div id="purchasesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden">
-                        <!-- JS Populated -->
-                    </div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">بحث واختيار صنف الشراء</label>
+                    <input type="text" id="purchasesProductSearch" placeholder="اكتب للبحث..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterPurchasesProducts()" onfocus="filterPurchasesProducts()">
+                    <div id="purchasesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden"></div>
                     <input type="hidden" id="selectedPurchasesProductCode">
                 </div>
 
@@ -693,6 +716,43 @@
         </div>
     </div>
 
+    <!-- Voucher Modal (Receipts & Payments) -->
+    <div id="voucherModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white rounded-xl max-w-md w-full p-6 shadow-xl space-y-4">
+            <div class="flex justify-between items-center border-b pb-3">
+                <h3 class="font-bold text-lg text-gray-800">إصدار سند قبض أو صرف</h3>
+                <button onclick="closeModal('voucherModal')" class="text-gray-400 hover:text-gray-600"><i class="fa-solid fa-xmark text-lg"></i></button>
+            </div>
+            <form id="voucherForm" onsubmit="saveVoucher(event)" class="space-y-3">
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">نوع السند</label>
+                    <select id="voucherType" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        <option value="Receipt">سند قبض (من عميل / إيراد)</option>
+                        <option value="Payment">سند صرف (لمورد / مستثمر / مصروف)</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">الجهة المعنية</label>
+                    <select id="voucherPartner" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                        <!-- JS populated -->
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">المبلغ (ج.م)</label>
+                    <input type="number" id="voucherAmount" step="0.01" min="1" required class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">البيان / الشرح</label>
+                    <input type="text" id="voucherDesc" required class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="مثال: تحصيل دفعة من حساب العميل">
+                </div>
+                <div class="flex justify-end space-x-2 space-x-reverse pt-2">
+                    <button type="button" onclick="closeModal('voucherModal')" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-semibold">إلغاء</button>
+                    <button type="submit" class="px-4 py-2 bg-primary text-white rounded-lg text-sm font-semibold">حفظ وترحيل السند</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <!-- Manual Journal Entry Modal -->
     <div id="journalModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
@@ -708,19 +768,15 @@
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">الحساب المدين (من حـ/)</label>
-                        <select id="journalDebitAcc" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                            <!-- JS populated -->
-                        </select>
+                        <select id="journalDebitAcc" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"></select>
                     </div>
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">الحساب الدائن (إلى حـ/)</label>
-                        <select id="journalCreditAcc" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                            <!-- JS populated -->
-                        </select>
+                        <select id="journalCreditAcc" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"></select>
                     </div>
                 </div>
                 <div>
-                    <label class="block text-xs font-semibold text-gray-600 mb-1">المبلغ (يجب أن يتطابق الطرفان)</label>
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">المبلغ</label>
                     <input type="number" id="journalAmount" step="0.01" min="1" required class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
                 </div>
                 <div class="flex justify-end space-x-2 space-x-reverse pt-2">
@@ -730,6 +786,9 @@
             </form>
         </div>
     </div>
+
+    <!-- Hidden Printable Receipt Area -->
+    <div id="printableInvoiceReceipt" class="hidden"></div>
 
     <!-- JavaScript ERP Engine -->
     <script>
@@ -756,6 +815,7 @@
             ],
             sales: [],
             purchases: [],
+            vouchers: [],
             journal: [
                 { id: 1, date: '2026-10-01', desc: 'إثبات رأس المال ومساهمات المستثمرين والصناديق', debitAcc: '101', creditAcc: '302', amount: 50000 }
             ]
@@ -773,6 +833,33 @@
             if(confirm('هل أنت متأكد من إعادة تعيين البيانات للافتراضية؟')) {
                 appState = JSON.parse(JSON.stringify(defaultState));
                 saveState();
+            }
+        }
+
+        // Backup & Restore
+        function exportBackup() {
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(appState, null, 2));
+            const downloadAnchor = document.createElement('a');
+            downloadAnchor.setAttribute("href", dataStr);
+            downloadAnchor.setAttribute("download", `Megabyte_ERP_Backup_${new Date().toISOString().split('T')[0]}.json`);
+            document.body.appendChild(downloadAnchor);
+            downloadAnchor.click();
+            downloadAnchor.remove();
+        }
+
+        function importBackup(event) {
+            const fileReader = new FileReader();
+            if(event.target.files[0]) {
+                fileReader.readAsText(event.target.files[0], "UTF-8");
+                fileReader.onload = (e) => {
+                    try {
+                        appState = JSON.parse(e.target.result);
+                        saveState();
+                        alert('تم استرجاع النسخة الاحتياطية بنجاح!');
+                    } catch (error) {
+                        alert('ملف النسخة الاحتياطية غير صالح!');
+                    }
+                };
             }
         }
 
@@ -826,6 +913,7 @@
             renderPartners();
             renderSales();
             renderPurchases();
+            renderVouchers();
             renderJournal();
             renderReports();
         }
@@ -881,18 +969,13 @@
             });
         }
 
-        // Partners Live Search & Filtering
         let selectedPartnerId = null;
         function setPartnerTypeFilter(type) {
             partnerTypeFilter = type;
             ['All', 'Customer', 'Supplier'].forEach(t => {
                 const btn = document.getElementById(`filter-btn-${t}`);
                 if(btn) {
-                    if(t === type) {
-                        btn.className = "flex-1 py-1 rounded bg-blue-600 text-white font-semibold";
-                    } else {
-                        btn.className = "flex-1 py-1 rounded bg-gray-100 text-gray-600 font-semibold hover:bg-gray-200";
-                    }
+                    btn.className = (t === type) ? "flex-1 py-1 rounded bg-blue-600 text-white font-semibold" : "flex-1 py-1 rounded bg-gray-100 text-gray-600 font-semibold hover:bg-gray-200";
                 }
             });
             renderPartners();
@@ -901,7 +984,6 @@
         function renderPartners() {
             const container = document.getElementById('partnersListContainer');
             container.innerHTML = '';
-            
             const searchQuery = (document.getElementById('partnerSearchInput')?.value || '').toLowerCase();
 
             let filteredPartners = appState.partners.filter(pt => {
@@ -949,9 +1031,15 @@
                 appState.sales.filter(s => s.customer === partner.name).forEach(s => {
                     transactions.push({ date: s.date, desc: `فاتورة مبيعات رقم #${s.id}`, debit: s.total, credit: 0 });
                 });
+                appState.vouchers.filter(v => v.partner === partner.name && v.type === 'Receipt').forEach(v => {
+                    transactions.push({ date: v.date, desc: `سند قبض رقم #${v.id} - ${v.desc}`, debit: 0, credit: v.amount });
+                });
             } else {
                 appState.purchases.filter(p => p.supplier === partner.name).forEach(p => {
                     transactions.push({ date: p.date, desc: `فاتورة مشتريات رقم #${p.id}`, debit: 0, credit: p.total });
+                });
+                appState.vouchers.filter(v => v.partner === partner.name && v.type === 'Payment').forEach(v => {
+                    transactions.push({ date: v.date, desc: `سند صرف رقم #${v.id} - ${v.desc}`, debit: v.amount, credit: 0 });
                 });
             }
 
@@ -975,23 +1063,17 @@
         }
 
         function printStatement() {
-            if(!selectedPartnerId) {
-                alert('الرجاء اختيار عميل أو مورد أولاً');
-                return;
-            }
+            if(!selectedPartnerId) { alert('الرجاء اختيار عميل أو مورد أولاً'); return; }
             window.print();
         }
 
-        // Smart Autocomplete Product Search Engines
         function filterSalesProducts() {
             const query = (document.getElementById('salesProductSearch').value || '').toLowerCase();
             const dropdown = document.getElementById('salesProductsDropdown');
             dropdown.innerHTML = '';
             
             const matches = appState.products.filter(p => 
-                (p.code.toLowerCase().includes(query) || 
-                 p.name.toLowerCase().includes(query) || 
-                 p.spec.toLowerCase().includes(query)) && p.qty > 0
+                (p.code.toLowerCase().includes(query) || p.name.toLowerCase().includes(query) || p.spec.toLowerCase().includes(query)) && p.qty > 0
             );
 
             if(matches.length === 0) {
@@ -1016,7 +1098,6 @@
                 div.onclick = () => selectSaleProduct(p);
                 dropdown.appendChild(div);
             });
-
             dropdown.classList.remove('hidden');
         }
 
@@ -1033,11 +1114,7 @@
             const dropdown = document.getElementById('purchasesProductsDropdown');
             dropdown.innerHTML = '';
             
-            const matches = appState.products.filter(p => 
-                p.code.toLowerCase().includes(query) || 
-                p.name.toLowerCase().includes(query) || 
-                p.spec.toLowerCase().includes(query)
-            );
+            const matches = appState.products.filter(p => p.code.toLowerCase().includes(query) || p.name.toLowerCase().includes(query) || p.spec.toLowerCase().includes(query));
 
             if(matches.length === 0) {
                 dropdown.innerHTML = `<div class="p-2 text-xs text-gray-400 text-center">لا توجد أصناف مطابقة</div>`;
@@ -1054,14 +1131,13 @@
                         <span class="text-gray-500 block">كود: ${p.code} | المقاس: ${p.spec}</span>
                     </div>
                     <div class="text-left">
-                        <span class="font-mono font-bold text-emerald-600">التكلفة الأخيرة: ${p.cost} ج.م</span>
-                        <span class="block text-[10px] text-gray-500">الرصيد الحالي: ${p.qty}</span>
+                        <span class="font-mono font-bold text-emerald-600">التكلفة: ${p.cost} ج.م</span>
+                        <span class="block text-[10px] text-gray-500">الرصيد: ${p.qty}</span>
                     </div>
                 `;
                 div.onclick = () => selectPurchaseProduct(p);
                 dropdown.appendChild(div);
             });
-
             dropdown.classList.remove('hidden');
         }
 
@@ -1095,10 +1171,56 @@
                         <td class="p-3 font-semibold">${s.customer}</td>
                         <td class="p-3"><span class="px-2 py-0.5 rounded text-xs ${s.paymentType === 'Cash' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${s.paymentType === 'Cash' ? 'نقدي' : 'آجل'}</span></td>
                         <td class="p-3 font-mono font-bold">${s.total.toLocaleString()} ج.م</td>
-                        <td class="p-3"><button onclick="deleteSale(${s.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash"></i></button></td>
+                        <td class="p-3 space-x-2 space-x-reverse">
+                            <button onclick="printSaleInvoice(${s.id})" class="text-blue-600 hover:text-blue-800 text-xs font-semibold"><i class="fa-solid fa-print"></i> طباعة</button>
+                            <button onclick="deleteSale(${s.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash"></i></button>
+                        </td>
                     </tr>
                 `;
             });
+        }
+
+        function printSaleInvoice(id) {
+            const sale = appState.sales.find(s => s.id === id);
+            if(!sale) return;
+            
+            const receiptArea = document.getElementById('printableInvoiceReceipt');
+            receiptArea.innerHTML = `
+                <div style="font-family: 'Cairo', sans-serif; direction: rtl; padding: 20px; max-width: 400px; margin: auto; font-size: 14px;">
+                    <div style="text-align: center; border-bottom: 2px dashed #333; padding-bottom: 10px; margin-bottom: 15px;">
+                        <h2 style="margin: 0; font-size: 18px; font-weight: bold;">ميجابايت ستور</h2>
+                        <p style="margin: 2px 0; font-size: 11px; color: #555;">لخدمات الكمبيوتر وحوامل الشاشات MJK</p>
+                        <p style="margin: 2px 0; font-size: 11px; color: #555;">التاريخ: ${sale.date} | فاتورة رقم: #${sale.id}</p>
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <strong>العميل:</strong> ${sale.customer}<br>
+                        <strong>طريقة الدفع:</strong> ${sale.paymentType === 'Cash' ? 'نقدي' : 'آجل'}
+                    </div>
+                    <table style="width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 12px;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid #333;">
+                                <th style="text-align: right; padding: 5px;">الصنف</th>
+                                <th style="text-align: center; padding: 5px;">الكمية</th>
+                                <th style="text-align: left; padding: 5px;">الإجمالي</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="padding: 5px;">مشتريات حوامل/أجهزة MJK</td>
+                                <td style="text-align: center; padding: 5px;">-</td>
+                                <td style="text-align: left; padding: 5px;">${sale.total.toLocaleString()} ج.م</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="border-top: 2px solid #333; padding-top: 8px; text-align: left; font-size: 15px; font-weight: bold;">
+                        الإجمالي النهائي: ${sale.total.toLocaleString()} ج.م
+                    </div>
+                    <div style="text-align: center; margin-top: 20px; font-size: 11px; color: #777;">
+                        شكراً لتعاملكم مع ميجابايت ستور
+                    </div>
+                </div>
+            `;
+            window.print();
         }
 
         function renderPurchases() {
@@ -1113,6 +1235,23 @@
                         <td class="p-3"><span class="px-2 py-0.5 rounded text-xs ${p.paymentType === 'Cash' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">${p.paymentType === 'Cash' ? 'نقدي' : 'آجل'}</span></td>
                         <td class="p-3 font-mono font-bold">${p.total.toLocaleString()} ج.م</td>
                         <td class="p-3"><button onclick="deletePurchase(${p.id})" class="text-red-500 hover:text-red-700 text-xs"><i class="fa-solid fa-trash"></i></button></td>
+                    </tr>
+                `;
+            });
+        }
+
+        function renderVouchers() {
+            const tbody = document.getElementById('vouchersTableBody');
+            tbody.innerHTML = '';
+            appState.vouchers.forEach(v => {
+                tbody.innerHTML += `
+                    <tr class="hover:bg-gray-50 text-xs">
+                        <td class="p-3 font-mono font-bold text-blue-600">#${v.id}</td>
+                        <td class="p-3">${v.date}</td>
+                        <td class="p-3"><span class="px-2 py-0.5 rounded ${v.type === 'Receipt' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">${v.type === 'Receipt' ? 'سند قبض' : 'سند صرف'}</span></td>
+                        <td class="p-3 font-semibold">${v.partner}</td>
+                        <td class="p-3 font-mono font-bold">${v.amount.toLocaleString()} ج.م</td>
+                        <td class="p-3 text-gray-600">${v.desc}</td>
                     </tr>
                 `;
             });
@@ -1140,15 +1279,10 @@
         function renderReports() {
             const tbBody = document.getElementById('trialBalanceBody');
             tbBody.innerHTML = '';
-            let totalDebit = 0, totalCredit = 0;
-
             appState.accounts.forEach(acc => {
                 let bal = getAccountBalance(acc.code);
                 let debitBal = bal > 0 ? bal : 0;
                 let creditBal = bal < 0 ? Math.abs(bal) : 0;
-                totalDebit += debitBal;
-                totalCredit += creditBal;
-
                 tbBody.innerHTML += `
                     <tr>
                         <td class="p-2 font-mono">${acc.code}</td>
@@ -1181,22 +1315,26 @@
             });
 
             document.getElementById('balanceSheetBox').innerHTML = `
-                <div class="flex justify-between py-1 border-b"><span>إجمالي الأصول (متداولة وثابتة):</span><span class="font-mono font-bold text-blue-600">${assetsTotal.toLocaleString()} ج.م</span></div>
-                <div class="flex justify-between py-1 border-b"><span>إجمالي الخصوم والالتزامات:</span><span class="font-mono font-bold text-rose-600">${liabilitiesTotal.toLocaleString()} ج.م</span></div>
-                <div class="flex justify-between py-1 border-b"><span>إجمالي حقوق الملكية والمساهمات:</span><span class="font-mono font-bold text-indigo-600">${equityTotal.toLocaleString()} ج.م</span></div>
-                <div class="flex justify-between py-2 font-bold text-base bg-gray-50 px-2 rounded"><span>تطابق الميزانية (أصول = خصوم + ملكية):</span><span class="font-mono text-emerald-600">متطابق</span></div>
+                <div class="flex justify-between py-1 border-b"><span>إجمالي الأصول:</span><span class="font-mono font-bold text-blue-600">${assetsTotal.toLocaleString()} ج.م</span></div>
+                <div class="flex justify-between py-1 border-b"><span>إجمالي الخصوم:</span><span class="font-mono font-bold text-rose-600">${liabilitiesTotal.toLocaleString()} ج.م</span></div>
+                <div class="flex justify-between py-1 border-b"><span>إجمالي حقوق الملكية:</span><span class="font-mono font-bold text-indigo-600">${equityTotal.toLocaleString()} ج.م</span></div>
+                <div class="flex justify-between py-2 font-bold text-base bg-gray-50 px-2 rounded"><span>تطابق الميزانية:</span><span class="font-mono text-emerald-600">متطابق</span></div>
             `;
         }
 
         function populateSelects() {
             const salesCust = document.getElementById('salesCustomer');
             const purSupp = document.getElementById('purchasesSupplier');
+            const vPart = document.getElementById('voucherPartner');
             if(salesCust) salesCust.innerHTML = '';
             if(purSupp) purSupp.innerHTML = '';
+            if(vPart) vPart.innerHTML = '';
 
             appState.partners.forEach(pt => {
-                if(pt.type === 'Customer' && salesCust) salesCust.innerHTML += `<option value="${pt.name}">${pt.name} (${pt.phone || ''})</option>`;
-                if(pt.type === 'Supplier' && purSupp) purSupp.innerHTML += `<option value="${pt.name}">${pt.name} (${pt.phone || ''})</option>`;
+                let opt = `<option value="${pt.name}">${pt.name} (${pt.type === 'Customer' ? 'عميل' : 'مورد'})</option>`;
+                if(pt.type === 'Customer' && salesCust) salesCust.innerHTML += opt;
+                if(pt.type === 'Supplier' && purSupp) purSupp.innerHTML += opt;
+                if(vPart) vPart.innerHTML += opt;
             });
 
             const dAcc = document.getElementById('journalDebitAcc');
@@ -1273,16 +1411,10 @@
             let customer = document.getElementById('salesCustomer').value;
             let paymentType = document.getElementById('salesPaymentType').value;
 
-            if(!prodCode) {
-                alert('الرجاء اختيار صنف من قائمة البحث!');
-                return;
-            }
+            if(!prodCode) { alert('الرجاء اختيار صنف من قائمة البحث!'); return; }
 
             let product = appState.products.find(p => p.code === prodCode);
-            if(!product || product.qty < qty) {
-                alert('الكمية المطلوبة غير متوفرة في المخزون!');
-                return;
-            }
+            if(!product || product.qty < qty) { alert('الكمية المطلوبة غير متوفرة في المخزون!'); return; }
 
             let totalCost = qty * product.cost;
             product.qty -= qty;
@@ -1295,21 +1427,13 @@
 
             let cashOrReceivableAcc = paymentType === 'Cash' ? '101' : '102';
             appState.journal.push({
-                id: Date.now() + 1,
-                date: today,
-                desc: `إثبات فاتورة مبيعات رقم #${invoiceId} للعميل ${customer}`,
-                debitAcc: cashOrReceivableAcc,
-                creditAcc: '401',
-                amount: totalSale
+                id: Date.now() + 1, date: today, desc: `إثبات فاتورة مبيعات رقم #${invoiceId} للعميل ${customer}`,
+                debitAcc: cashOrReceivableAcc, creditAcc: '401', amount: totalSale
             });
 
             appState.journal.push({
-                id: Date.now() + 2,
-                date: today,
-                desc: `إثبات تكلفة بضاعة مباعة لفاتورة #${invoiceId}`,
-                debitAcc: '501',
-                creditAcc: '103',
-                amount: totalCost
+                id: Date.now() + 2, date: today, desc: `إثبات تكلفة بضاعة مباعة لفاتورة #${invoiceId}`,
+                debitAcc: '501', creditAcc: '103', amount: totalCost
             });
 
             saveState();
@@ -1326,10 +1450,7 @@
             let supplier = document.getElementById('purchasesSupplier').value;
             let paymentType = document.getElementById('purchasesPaymentType').value;
 
-            if(!prodCode) {
-                alert('الرجاء اختيار صنف شراء من قائمة البحث!');
-                return;
-            }
+            if(!prodCode) { alert('الرجاء اختيار صنف شراء من قائمة البحث!'); return; }
 
             let product = appState.products.find(p => p.code === prodCode);
             if(!product) return;
@@ -1348,12 +1469,8 @@
 
             let cashOrPayableAcc = paymentType === 'Cash' ? '101' : '201';
             appState.journal.push({
-                id: Date.now() + 1,
-                date: today,
-                desc: `إثبات فاتورة مشتريات بضاعة رقم #${invoiceId} من المورد ${supplier}`,
-                debitAcc: '103',
-                creditAcc: cashOrPayableAcc,
-                amount: totalPurchase
+                id: Date.now() + 1, date: today, desc: `إثبات فاتورة مشتريات رقم #${invoiceId} من المورد ${supplier}`,
+                debitAcc: '103', creditAcc: cashOrPayableAcc, amount: totalPurchase
             });
 
             saveState();
@@ -1362,24 +1479,47 @@
             document.getElementById('selectedPurchasesProductCode').value = '';
         }
 
+        function saveVoucher(e) {
+            e.preventDefault();
+            let type = document.getElementById('voucherType').value;
+            let partner = document.getElementById('voucherPartner').value;
+            let amount = Number(document.getElementById('voucherAmount').value);
+            let desc = document.getElementById('voucherDesc').value;
+            let voucherId = Date.now();
+            let today = new Date().toISOString().split('T')[0];
+
+            appState.vouchers.push({ id: voucherId, date: today, type, partner, amount, desc });
+
+            if(type === 'Receipt') {
+                // From Cash/Machine to Customer (reduces receivables)
+                appState.journal.push({
+                    id: Date.now() + 1, date: today, desc: `سند قبض #${voucherId} - ${desc}`,
+                    debitAcc: '101', creditAcc: '102', amount: amount
+                });
+            } else {
+                // From Supplier to Cash (reduces payables)
+                appState.journal.push({
+                    id: Date.now() + 1, date: today, desc: `سند صرف #${voucherId} - ${desc}`,
+                    debitAcc: '201', creditAcc: '101', amount: amount
+                });
+            }
+
+            saveState();
+            closeModal('voucherModal');
+            document.getElementById('voucherForm').reset();
+        }
+
         function saveManualJournal(e) {
             e.preventDefault();
             let debitAcc = document.getElementById('journalDebitAcc').value;
             let creditAcc = document.getElementById('journalCreditAcc').value;
             let amount = Number(document.getElementById('journalAmount').value);
 
-            if(debitAcc === creditAcc) {
-                alert('لا يمكن أن يكون الحساب المدين مطابظاً للحساب الدائن في القيد المزدوج!');
-                return;
-            }
+            if(debitAcc === creditAcc) { alert('لا يمكن أن يكون الحساب المدين مطابقاً للحساب الدائن!'); return; }
 
             appState.journal.push({
-                id: Date.now(),
-                date: new Date().toISOString().split('T')[0],
-                desc: document.getElementById('journalDesc').value,
-                debitAcc,
-                creditAcc,
-                amount
+                id: Date.now(), date: new Date().toISOString().split('T')[0],
+                desc: document.getElementById('journalDesc').value, debitAcc, creditAcc, amount
             });
 
             saveState();
@@ -1388,14 +1528,14 @@
         }
 
         function deleteSale(id) {
-            if(confirm('هل أنت متأكد من حذف هذه الفاتورة؟')) {
+            if(confirm('هل أنت متأكد من حذف الفاتورة؟')) {
                 appState.sales = appState.sales.filter(s => s.id !== id);
                 saveState();
             }
         }
 
         function deletePurchase(id) {
-            if(confirm('هل أنت متأكد من حذف فاتورة المشتريات هذه؟')) {
+            if(confirm('هل أنت متأكد من حذف الفاتورة؟')) {
                 appState.purchases = appState.purchases.filter(p => p.id !== id);
                 saveState();
             }
