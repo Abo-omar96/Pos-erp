@@ -27,8 +27,8 @@
         body { font-family: 'Cairo', sans-serif; }
         @media print {
             body * { visibility: hidden; }
-            #printableArea, #printableArea * { visibility: visible; }
-            #printableArea { position: absolute; left: 0; top: 0; width: 100%; }
+            #printableArea, #printableArea *, #printableAreaStatement, #printableAreaStatement * { visibility: visible; }
+            #printableAreaStatement { position: absolute; left: 0; top: 0; width: 100%; }
             .no-print { display: none !important; }
         }
     </style>
@@ -97,7 +97,7 @@
                 </a>
             </nav>
             <div class="p-4 border-t border-gray-800 text-xs text-gray-500 text-center">
-                إصدار الـ ERP المحاسبي 3.5 &copy; 2026
+                إصدار الـ ERP المحاسبي 3.8 &copy; 2026
             </div>
         </aside>
 
@@ -252,7 +252,7 @@
                 </div>
             </section>
 
-            <!-- 4. PARTNERS (CUSTOMERS & SUPPLIERS) TAB -->
+            <!-- 4. PARTNERS (CUSTOMERS & SUPPLIERS) TAB WITH SEARCH -->
             <section id="tab-partners" class="space-y-6 tab-content hidden">
                 <div class="flex justify-between items-center">
                     <h2 class="text-xl font-bold text-gray-900">سجل العملاء والموردين وكشوف الحسابات</h2>
@@ -262,9 +262,23 @@
                 </div>
                 
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 lg:col-span-1">
-                        <h3 class="font-bold text-gray-800 mb-3 text-sm">قائمة العملاء والموردين</h3>
-                        <div id="partnersListContainer" class="space-y-2 max-h-96 overflow-y-auto">
+                    <div class="bg-white rounded-xl shadow-sm border border-gray-200 p-4 lg:col-span-1 space-y-3">
+                        <h3 class="font-bold text-gray-800 text-sm">دليل العملاء والموردين</h3>
+                        
+                        <!-- Search & Filter Header -->
+                        <div class="space-y-2">
+                            <div class="relative">
+                                <input type="text" id="partnerSearchInput" oninput="renderPartners()" placeholder="بحث باسم العميل أو المورد أو رقم الهاتف..." class="w-full border rounded-lg pr-8 pl-2 py-1.5 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                                <i class="fa-solid fa-magnifying-glass absolute right-2.5 top-2.5 text-gray-400 text-xs"></i>
+                            </div>
+                            <div class="flex gap-1 text-[11px]">
+                                <button onclick="setPartnerTypeFilter('All')" id="filter-btn-All" class="flex-1 py-1 rounded bg-blue-600 text-white font-semibold">الكل</button>
+                                <button onclick="setPartnerTypeFilter('Customer')" id="filter-btn-Customer" class="flex-1 py-1 rounded bg-gray-100 text-gray-600 font-semibold hover:bg-gray-200">العملاء</button>
+                                <button onclick="setPartnerTypeFilter('Supplier')" id="filter-btn-Supplier" class="flex-1 py-1 rounded bg-gray-100 text-gray-600 font-semibold hover:bg-gray-200">الموردين</button>
+                            </div>
+                        </div>
+
+                        <div id="partnersListContainer" class="space-y-2 max-h-96 overflow-y-auto pt-1">
                             <!-- JS populated -->
                         </div>
                     </div>
@@ -412,7 +426,7 @@
                         </div>
                     </div>
 
-                    <!-- Income Statement & Balance Sheet side-by-side -->
+                    <!-- Income Statement & Balance Sheet -->
                     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <div class="bg-white p-5 rounded-xl shadow-sm border border-gray-200">
                             <h3 class="font-bold text-gray-800 mb-3 border-b pb-2"><i class="fa-solid fa-file-invoice-dollar ml-2 text-emerald-600"></i> قائمة الدخل (الإيرادات والمصروفات)</h3>
@@ -434,7 +448,7 @@
         </main>
     </div>
 
-    <!-- Mobile Bottom Navigation Bar -->
+    <!-- Mobile Navigation -->
     <div class="md:hidden fixed bottom-0 inset-x-0 bg-secondary text-gray-300 border-t border-gray-800 flex justify-around py-2.5 z-45 no-print text-xs">
         <button onclick="switchTab('dashboard')" class="flex flex-col items-center focus:text-blue-400 mobile-nav-btn active-nav" data-tab="dashboard">
             <i class="fa-solid fa-chart-pie text-base"></i>
@@ -460,7 +474,7 @@
 
     <!-- MODALS CONTAINER -->
 
-    <!-- 1. Add Account Modal -->
+    <!-- Account Modal -->
     <div id="accountModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-md w-full p-6 shadow-xl space-y-4">
             <div class="flex justify-between items-center border-b pb-3">
@@ -494,7 +508,7 @@
         </div>
     </div>
 
-    <!-- 2. Add Product/MJK Item Modal -->
+    <!-- Product Modal -->
     <div id="productModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-md w-full p-6 shadow-xl space-y-4">
             <div class="flex justify-between items-center border-b pb-3">
@@ -536,7 +550,7 @@
         </div>
     </div>
 
-    <!-- 3. Add Partner Modal -->
+    <!-- Partner Modal -->
     <div id="partnerModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-md w-full p-6 shadow-xl space-y-4">
             <div class="flex justify-between items-center border-b pb-3">
@@ -567,7 +581,7 @@
         </div>
     </div>
 
-    <!-- 4. Sales Invoice Modal -->
+    <!-- Sales Invoice Modal with Smart Product Search -->
     <div id="salesModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3">
@@ -590,12 +604,17 @@
                         </select>
                     </div>
                 </div>
-                <div>
-                    <label class="block text-xs font-semibold text-gray-600 mb-1">اختر الصنف (MJK)</label>
-                    <select id="salesProduct" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" onchange="updateSalePrice()">
-                        <!-- JS populated -->
-                    </select>
+
+                <!-- Smart Product Search for Sales -->
+                <div class="relative">
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">بحث واختيار الصنف (بالكود أو الاسم أو المقاس)</label>
+                    <input type="text" id="salesProductSearch" placeholder="اكتب للبحث (مثال: MJK أو متحرك)..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterSalesProducts()" onfocus="filterSalesProducts()">
+                    <div id="salesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden">
+                        <!-- JS Populated -->
+                    </div>
+                    <input type="hidden" id="selectedSalesProductCode">
                 </div>
+
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">الكمية المباعة</label>
@@ -618,7 +637,7 @@
         </div>
     </div>
 
-    <!-- 5. Purchases Invoice Modal -->
+    <!-- Purchases Invoice Modal with Smart Product Search -->
     <div id="purchasesModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3">
@@ -641,12 +660,17 @@
                         </select>
                     </div>
                 </div>
-                <div>
-                    <label class="block text-xs font-semibold text-gray-600 mb-1">اختر الصنف (MJK)</label>
-                    <select id="purchasesProduct" class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
-                        <!-- JS populated -->
-                    </select>
+
+                <!-- Smart Product Search for Purchases -->
+                <div class="relative">
+                    <label class="block text-xs font-semibold text-gray-600 mb-1">بحث واختيار صنف الشراء (بالكود أو الاسم أو المقاس)</label>
+                    <input type="text" id="purchasesProductSearch" placeholder="اكتب للبحث (مثال: MJK أو ثابت)..." class="w-full border rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none" oninput="filterPurchasesProducts()" onfocus="filterPurchasesProducts()">
+                    <div id="purchasesProductsDropdown" class="absolute z-50 bg-white border border-gray-200 rounded-lg shadow-lg w-full mt-1 max-h-48 overflow-y-auto hidden">
+                        <!-- JS Populated -->
+                    </div>
+                    <input type="hidden" id="selectedPurchasesProductCode">
                 </div>
+
                 <div class="grid grid-cols-2 gap-2">
                     <div>
                         <label class="block text-xs font-semibold text-gray-600 mb-1">الكمية المشتراة</label>
@@ -669,7 +693,7 @@
         </div>
     </div>
 
-    <!-- 6. Manual Journal Entry Modal -->
+    <!-- Manual Journal Entry Modal -->
     <div id="journalModal" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
         <div class="bg-white rounded-xl max-w-lg w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div class="flex justify-between items-center border-b pb-3">
@@ -709,7 +733,6 @@
 
     <!-- JavaScript ERP Engine -->
     <script>
-        // Initial Default Database Structure
         const defaultState = {
             accounts: [
                 { code: '101', name: 'الصناديق وماكينات الدفع', category: 'Assets', type: 'Debit' },
@@ -739,6 +762,7 @@
         };
 
         let appState = JSON.parse(localStorage.getItem('megabyte_erp_state')) || defaultState;
+        let partnerTypeFilter = 'All';
 
         function saveState() {
             localStorage.setItem('megabyte_erp_state', JSON.stringify(appState));
@@ -752,7 +776,6 @@
             }
         }
 
-        // Navigation and UI
         function switchTab(tabId) {
             document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
             document.getElementById('tab-' + tabId).classList.remove('hidden');
@@ -768,7 +791,6 @@
                 if(el.getAttribute('data-tab') === tabId) el.classList.add('text-blue-400');
             });
 
-            // Close sidebar on mobile
             document.getElementById('sidebar').classList.add('translate-x-full');
         }
 
@@ -788,7 +810,6 @@
             document.getElementById(modalId).classList.add('hidden');
         }
 
-        // Financial & Account calculations
         function getAccountBalance(accCode) {
             let balance = 0;
             appState.journal.forEach(j => {
@@ -815,7 +836,6 @@
             let payables = Math.abs(getAccountBalance('201'));
             let investors = Math.abs(getAccountBalance('301'));
 
-            // Net Assets Formula: (Receivables + Cash) - (Payables + Investors)
             let netAssets = (receivables + cash) - (payables + investors);
 
             document.getElementById('kpi-net-assets').innerText = netAssets.toLocaleString() + ' ج.م';
@@ -861,11 +881,41 @@
             });
         }
 
+        // Partners Live Search & Filtering
         let selectedPartnerId = null;
+        function setPartnerTypeFilter(type) {
+            partnerTypeFilter = type;
+            ['All', 'Customer', 'Supplier'].forEach(t => {
+                const btn = document.getElementById(`filter-btn-${t}`);
+                if(btn) {
+                    if(t === type) {
+                        btn.className = "flex-1 py-1 rounded bg-blue-600 text-white font-semibold";
+                    } else {
+                        btn.className = "flex-1 py-1 rounded bg-gray-100 text-gray-600 font-semibold hover:bg-gray-200";
+                    }
+                }
+            });
+            renderPartners();
+        }
+
         function renderPartners() {
             const container = document.getElementById('partnersListContainer');
             container.innerHTML = '';
-            appState.partners.forEach(pt => {
+            
+            const searchQuery = (document.getElementById('partnerSearchInput')?.value || '').toLowerCase();
+
+            let filteredPartners = appState.partners.filter(pt => {
+                const matchesType = (partnerTypeFilter === 'All') || (pt.type === partnerTypeFilter);
+                const matchesQuery = pt.name.toLowerCase().includes(searchQuery) || (pt.phone && pt.phone.includes(searchQuery));
+                return matchesType && matchesQuery;
+            });
+
+            if(filteredPartners.length === 0) {
+                container.innerHTML = `<div class="p-4 text-center text-xs text-gray-400">لا توجد جهات مطابقة للبحث</div>`;
+                return;
+            }
+
+            filteredPartners.forEach(pt => {
                 container.innerHTML += `
                     <div onclick="selectPartner(${pt.id})" class="p-3 rounded-lg border cursor-pointer hover:bg-blue-50 transition ${selectedPartnerId === pt.id ? 'border-blue-500 bg-blue-50/50' : 'border-gray-200'}">
                         <div class="flex justify-between items-center">
@@ -932,6 +982,108 @@
             window.print();
         }
 
+        // Smart Autocomplete Product Search Engines
+        function filterSalesProducts() {
+            const query = (document.getElementById('salesProductSearch').value || '').toLowerCase();
+            const dropdown = document.getElementById('salesProductsDropdown');
+            dropdown.innerHTML = '';
+            
+            const matches = appState.products.filter(p => 
+                (p.code.toLowerCase().includes(query) || 
+                 p.name.toLowerCase().includes(query) || 
+                 p.spec.toLowerCase().includes(query)) && p.qty > 0
+            );
+
+            if(matches.length === 0) {
+                dropdown.innerHTML = `<div class="p-2 text-xs text-gray-400 text-center">لا توجد أصناف مطابقة أو المخزون فارغ</div>`;
+                dropdown.classList.remove('hidden');
+                return;
+            }
+
+            matches.forEach(p => {
+                let div = document.createElement('div');
+                div.className = 'p-2.5 hover:bg-blue-50 cursor-pointer border-b border-gray-100 text-xs flex justify-between items-center';
+                div.innerHTML = `
+                    <div>
+                        <span class="font-bold text-gray-800">${p.name}</span>
+                        <span class="text-gray-500 block">كود: ${p.code} | المقاس: ${p.spec}</span>
+                    </div>
+                    <div class="text-left">
+                        <span class="font-mono font-bold text-blue-600">${p.price} ج.م</span>
+                        <span class="block text-[10px] text-emerald-600 font-bold">متاح: ${p.qty}</span>
+                    </div>
+                `;
+                div.onclick = () => selectSaleProduct(p);
+                dropdown.appendChild(div);
+            });
+
+            dropdown.classList.remove('hidden');
+        }
+
+        function selectSaleProduct(product) {
+            document.getElementById('salesProductSearch').value = `${product.name} (${product.spec})`;
+            document.getElementById('selectedSalesProductCode').value = product.code;
+            document.getElementById('salesUnitPrice').value = product.price;
+            document.getElementById('salesProductsDropdown').classList.add('hidden');
+            calcSaleTotal();
+        }
+
+        function filterPurchasesProducts() {
+            const query = (document.getElementById('purchasesProductSearch').value || '').toLowerCase();
+            const dropdown = document.getElementById('purchasesProductsDropdown');
+            dropdown.innerHTML = '';
+            
+            const matches = appState.products.filter(p => 
+                p.code.toLowerCase().includes(query) || 
+                p.name.toLowerCase().includes(query) || 
+                p.spec.toLowerCase().includes(query)
+            );
+
+            if(matches.length === 0) {
+                dropdown.innerHTML = `<div class="p-2 text-xs text-gray-400 text-center">لا توجد أصناف مطابقة</div>`;
+                dropdown.classList.remove('hidden');
+                return;
+            }
+
+            matches.forEach(p => {
+                let div = document.createElement('div');
+                div.className = 'p-2.5 hover:bg-emerald-50 cursor-pointer border-b border-gray-100 text-xs flex justify-between items-center';
+                div.innerHTML = `
+                    <div>
+                        <span class="font-bold text-gray-800">${p.name}</span>
+                        <span class="text-gray-500 block">كود: ${p.code} | المقاس: ${p.spec}</span>
+                    </div>
+                    <div class="text-left">
+                        <span class="font-mono font-bold text-emerald-600">التكلفة الأخيرة: ${p.cost} ج.م</span>
+                        <span class="block text-[10px] text-gray-500">الرصيد الحالي: ${p.qty}</span>
+                    </div>
+                `;
+                div.onclick = () => selectPurchaseProduct(p);
+                dropdown.appendChild(div);
+            });
+
+            dropdown.classList.remove('hidden');
+        }
+
+        function selectPurchaseProduct(product) {
+            document.getElementById('purchasesProductSearch').value = `${product.name} (${product.spec})`;
+            document.getElementById('selectedPurchasesProductCode').value = product.code;
+            document.getElementById('purchasesUnitPrice').value = product.cost;
+            document.getElementById('purchasesProductsDropdown').classList.add('hidden');
+            calcPurchaseTotal();
+        }
+
+        document.addEventListener('click', (e) => {
+            if(!e.target.closest('#salesProductSearch') && !e.target.closest('#salesProductsDropdown')) {
+                const drop = document.getElementById('salesProductsDropdown');
+                if(drop) drop.classList.add('hidden');
+            }
+            if(!e.target.closest('#purchasesProductSearch') && !e.target.closest('#purchasesProductsDropdown')) {
+                const drop = document.getElementById('purchasesProductsDropdown');
+                if(drop) drop.classList.add('hidden');
+            }
+        });
+
         function renderSales() {
             const tbody = document.getElementById('salesTableBody');
             tbody.innerHTML = '';
@@ -986,7 +1138,6 @@
         }
 
         function renderReports() {
-            // Trial Balance
             const tbBody = document.getElementById('trialBalanceBody');
             tbBody.innerHTML = '';
             let totalDebit = 0, totalCredit = 0;
@@ -1009,7 +1160,6 @@
                 `;
             });
 
-            // Income Statement
             let revTotal = Math.abs(getAccountBalance('401'));
             let cogsTotal = Math.abs(getAccountBalance('501'));
             let expTotal = Math.abs(getAccountBalance('502'));
@@ -1022,7 +1172,6 @@
                 <div class="flex justify-between py-2 font-bold text-base bg-gray-50 px-2 rounded"><span>صافي الربح / (الخسارة):</span><span class="font-mono ${netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'}">${netProfit.toLocaleString()} ج.م</span></div>
             `;
 
-            // Balance Sheet
             let assetsTotal = 0, liabilitiesTotal = 0, equityTotal = 0;
             appState.accounts.forEach(acc => {
                 let bal = getAccountBalance(acc.code);
@@ -1039,32 +1188,17 @@
             `;
         }
 
-        // Populating Select Dropdowns
         function populateSelects() {
-            // Partners
             const salesCust = document.getElementById('salesCustomer');
             const purSupp = document.getElementById('purchasesSupplier');
             if(salesCust) salesCust.innerHTML = '';
             if(purSupp) purSupp.innerHTML = '';
 
             appState.partners.forEach(pt => {
-                if(pt.type === 'Customer' && salesCust) salesCust.innerHTML += `<option value="${pt.name}">${pt.name}</option>`;
-                if(pt.type === 'Supplier' && purSupp) purSupp.innerHTML += `<option value="${pt.name}">${pt.name}</option>`;
+                if(pt.type === 'Customer' && salesCust) salesCust.innerHTML += `<option value="${pt.name}">${pt.name} (${pt.phone || ''})</option>`;
+                if(pt.type === 'Supplier' && purSupp) purSupp.innerHTML += `<option value="${pt.name}">${pt.name} (${pt.phone || ''})</option>`;
             });
 
-            // Products
-            const salesProd = document.getElementById('salesProduct');
-            const purProd = document.getElementById('purchasesProduct');
-            if(salesProd) salesProd.innerHTML = '';
-            if(purProd) purProd.innerHTML = '';
-
-            appState.products.forEach(p => {
-                let opt = `<option value="${p.code}" data-price="${p.price}" data-cost="${p.cost}">${p.name} (${p.spec}) - متاح: ${p.qty}</option>`;
-                if(salesProd) salesProd.innerHTML += opt;
-                if(purProd) purProd.innerHTML += opt;
-            });
-
-            // Accounts for Journal
             const dAcc = document.getElementById('journalDebitAcc');
             const cAcc = document.getElementById('journalCreditAcc');
             if(dAcc && cAcc) {
@@ -1075,16 +1209,6 @@
                     dAcc.innerHTML += opt;
                     cAcc.innerHTML += opt;
                 });
-            }
-            if(salesProd) updateSalePrice();
-        }
-
-        function updateSalePrice() {
-            const select = document.getElementById('salesProduct');
-            const selectedOpt = select.options[select.selectedIndex];
-            if(selectedOpt) {
-                document.getElementById('salesUnitPrice').value = selectedOpt.getAttribute('data-price');
-                calcSaleTotal();
             }
         }
 
@@ -1100,7 +1224,6 @@
             document.getElementById('purchasesTotalDisplay').innerText = (qty * price).toLocaleString() + ' ج.م';
         }
 
-        // Form Submission Actions
         function saveAccount(e) {
             e.preventDefault();
             appState.accounts.push({
@@ -1144,11 +1267,16 @@
 
         function saveSalesInvoice(e) {
             e.preventDefault();
-            let prodCode = document.getElementById('salesProduct').value;
+            let prodCode = document.getElementById('selectedSalesProductCode').value;
             let qty = Number(document.getElementById('salesQty').value);
             let unitPrice = Number(document.getElementById('salesUnitPrice').value);
             let customer = document.getElementById('salesCustomer').value;
             let paymentType = document.getElementById('salesPaymentType').value;
+
+            if(!prodCode) {
+                alert('الرجاء اختيار صنف من قائمة البحث!');
+                return;
+            }
 
             let product = appState.products.find(p => p.code === prodCode);
             if(!product || product.qty < qty) {
@@ -1156,7 +1284,6 @@
                 return;
             }
 
-            // Deduct inventory & calculate weighted average cost of sold goods
             let totalCost = qty * product.cost;
             product.qty -= qty;
 
@@ -1166,7 +1293,6 @@
 
             appState.sales.push({ id: invoiceId, date: today, customer, paymentType, total: totalSale });
 
-            // Auto Double-Entry Journal for Sales
             let cashOrReceivableAcc = paymentType === 'Cash' ? '101' : '102';
             appState.journal.push({
                 id: Date.now() + 1,
@@ -1177,7 +1303,6 @@
                 amount: totalSale
             });
 
-            // Auto Double-Entry Journal for COGS & Inventory reduction
             appState.journal.push({
                 id: Date.now() + 2,
                 date: today,
@@ -1189,20 +1314,26 @@
 
             saveState();
             closeModal('salesModal');
+            document.getElementById('salesProductSearch').value = '';
+            document.getElementById('selectedSalesProductCode').value = '';
         }
 
         function savePurchasesInvoice(e) {
             e.preventDefault();
-            let prodCode = document.getElementById('purchasesProduct').value;
+            let prodCode = document.getElementById('selectedPurchasesProductCode').value;
             let qty = Number(document.getElementById('purchasesQty').value);
             let unitPrice = Number(document.getElementById('purchasesUnitPrice').value);
             let supplier = document.getElementById('purchasesSupplier').value;
             let paymentType = document.getElementById('purchasesPaymentType').value;
 
+            if(!prodCode) {
+                alert('الرجاء اختيار صنف شراء من قائمة البحث!');
+                return;
+            }
+
             let product = appState.products.find(p => p.code === prodCode);
             if(!product) return;
 
-            // Weighted Average Cost recalculation
             let oldTotalVal = product.qty * product.cost;
             let newBatchVal = qty * unitPrice;
             let newTotalQty = product.qty + qty;
@@ -1215,7 +1346,6 @@
 
             appState.purchases.push({ id: invoiceId, date: today, supplier, paymentType, total: totalPurchase });
 
-            // Auto Double-Entry Journal for Purchase
             let cashOrPayableAcc = paymentType === 'Cash' ? '101' : '201';
             appState.journal.push({
                 id: Date.now() + 1,
@@ -1228,6 +1358,8 @@
 
             saveState();
             closeModal('purchasesModal');
+            document.getElementById('purchasesProductSearch').value = '';
+            document.getElementById('selectedPurchasesProductCode').value = '';
         }
 
         function saveManualJournal(e) {
@@ -1269,7 +1401,6 @@
             }
         }
 
-        // Initial Load on startup
         renderAll();
     </script>
 </body>
