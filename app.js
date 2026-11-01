@@ -15,6 +15,7 @@ import {
   onSnapshot,
   runTransaction,
   setDoc,
+  deleteDoc,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const isConfigured = firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("YOUR_");
@@ -26,8 +27,9 @@ const pageContent = document.querySelector("#page-content");
 const modalRoot = document.querySelector("#modal-root");
 const toastRoot = document.querySelector("#toast-root");
 
-const auth = isConfigured ? getAuth(initializeApp(firebaseConfig)) : null;
-const db = isConfigured ? getFirestore() : null;
+const app = isConfigured ? initializeApp(firebaseConfig) : null;
+const auth = app ? getAuth(app) : null;
+const db = app ? getFirestore(app) : null;
 const state = {
   user: null,
   page: "dashboard",
@@ -177,6 +179,133 @@ const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => 
 const selected = (value, current) => value === current ? " selected" : "";
 const list = (name) => state.collections[name] || [];
 
+// ---- بحث: تطبيع النص العربي (تشكيل/همزات/ة/ى/أرقام) ----
+const normalizeText = (value) => String(value ?? "").toLowerCase()
+  .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+  .replace(/[أإآٱ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه")
+  .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 1632))
+  .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 1776))
+  .trim();
+const matchesFilter = (values, query = state.filter) => {
+  const q = normalizeText(query);
+  if (!q) return true;
+  const haystack = normalizeText(values.join(" "));
+  return q.split(/\s+/).every((part) => haystack.includes(part));
+};
+const searchBar = (placeholder, count, unit) => `<div class="toolbar"><input class="toolbar-search" data-filter placeholder="${escapeHTML(placeholder)}" value="${escapeHTML(state.filter)}" /><span class="muted">${number(count)} ${unit}</span></div>`;
+
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; if (state.user) renderPage(); });
+}
+
+// ---- قائمة منسدلة قابلة للبحث (الأصناف / العملاء / الموردون) ----
+const comboSources = {
+  items: () => list("items").map((r) => ({ id: r.id, label: r.name || r.code, sub: `${r.code || ""} · الرصيد ${number(r.quantity)}${r.barcode ? ` · ${r.barcode}` : ""}`, search: [r.name, r.code, r.barcode, r.category], low: r.trackInventory !== false && Number(r.quantity || 0) <= 0 })),
+  customers: () => list("customers").map((r) => ({ id: r.id, label: r.name, sub: [r.code, r.phone].filter(Boolean).join(" · "), search: [r.name, r.code, r.phone, r.taxNumber] })),
+  suppliers: () => list("suppliers").map((r) => ({ id: r.id, label: r.name, sub: [r.code, r.phone].filter(Boolean).join(" · "), search: [r.name, r.code, r.phone, r.taxNumber] })),
+};
+const comboRows = (combo) => comboSources[combo.dataset.source]?.() || [];
+
+function comboHTML({ name = "", source, value = "", placeholder = "اكتب للبحث...", className = "" }) {
+  const current = (comboSources[source]?.() || []).find((r) => r.id === value);
+  return `<div class="combo" data-combo data-source="${source}"><input type="text" class="combo-input" autocomplete="off" placeholder="${escapeHTML(placeholder)}" value="${escapeHTML(current?.label || "")}" /><input type="hidden" class="combo-value ${className}" ${name ? `name="${name}"` : ""} value="${escapeHTML(value)}" /><div class="combo-list is-hidden" role="listbox"></div></div>`;
+}
+function closeCombos() {
+  document.querySelectorAll(".combo-list:not(.is-hidden)").forEach((el) => el.classList.add("is-hidden"));
+}
+function openCombo(combo, query = "") {
+  closeCombos();
+  const listEl = combo.querySelector(".combo-list");
+  const rows = comboRows(combo).filter((r) => matchesFilter(r.search, query)).slice(0, 40);
+  listEl.innerHTML = rows.length
+    ? rows.map((r, i) => `<div class="combo-option${i === 0 ? " active" : ""}" role="option" data-id="${escapeHTML(r.id)}"><strong>${escapeHTML(r.label)}</strong><small${r.low ? ' class="is-low"' : ""}>${escapeHTML(r.sub || "")}</small></div>`).join("")
+    : `<div class="combo-empty">لا توجد نتائج مطابقة</div>`;
+  const rect = combo.getBoundingClientRect();
+  const width = Math.max(rect.width, 280);
+  listEl.style.width = `${width}px`;
+  listEl.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
+  const below = window.innerHeight - rect.bottom;
+  if (below < 220 && rect.top > below) { listEl.style.top = "auto"; listEl.style.bottom = `${window.innerHeight - rect.top + 4}px`; }
+  else { listEl.style.bottom = "auto"; listEl.style.top = `${rect.bottom + 4}px`; }
+  listEl.classList.remove("is-hidden");
+}
+function pickCombo(combo, id) {
+  const row = comboRows(combo).find((r) => r.id === id);
+  if (!row) return;
+  combo.querySelector(".combo-input").value = row.label;
+  const hidden = combo.querySelector(".combo-value");
+  hidden.value = row.id;
+  hidden.dispatchEvent(new Event("change", { bubbles: true }));
+  closeCombos();
+}
+function bindComboEvents() {
+  document.addEventListener("focusin", (event) => {
+    if (event.target.matches?.(".combo-input")) { event.target.select(); openCombo(event.target.closest(".combo"), ""); }
+  });
+  document.addEventListener("click", (event) => {
+    const input = event.target.closest?.(".combo-input");
+    if (input) { const combo = input.closest(".combo"); if (combo.querySelector(".combo-list").classList.contains("is-hidden")) openCombo(combo, ""); return; }
+    if (!event.target.closest?.(".combo")) closeCombos();
+  });
+  document.addEventListener("input", (event) => {
+    if (!event.target.matches?.(".combo-input")) return;
+    const combo = event.target.closest(".combo");
+    const hidden = combo.querySelector(".combo-value");
+    if (hidden.value) { hidden.value = ""; hidden.dispatchEvent(new Event("change", { bubbles: true })); }
+    openCombo(combo, event.target.value);
+  });
+  document.addEventListener("mousedown", (event) => {
+    const option = event.target.closest?.(".combo-option");
+    if (!option) return;
+    event.preventDefault();
+    pickCombo(option.closest(".combo"), option.dataset.id);
+  });
+  document.addEventListener("focusout", (event) => {
+    if (!event.target.matches?.(".combo-input")) return;
+    const combo = event.target.closest(".combo");
+    if (combo.contains(event.relatedTarget)) return;
+    const hidden = combo.querySelector(".combo-value");
+    const row = comboRows(combo).find((r) => r.id === hidden.value);
+    event.target.value = row ? row.label : "";
+    combo.querySelector(".combo-list").classList.add("is-hidden");
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (document.querySelector(".combo-list:not(.is-hidden)")) closeCombos();
+      else if (modalRoot.firstElementChild) closeModal();
+      return;
+    }
+    const input = event.target.matches?.(".combo-input") ? event.target : null;
+    if (!input) return;
+    const combo = input.closest(".combo");
+    const listEl = combo.querySelector(".combo-list");
+    const open = !listEl.classList.contains("is-hidden");
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) { openCombo(combo, ""); return; }
+      const options = [...listEl.querySelectorAll(".combo-option")];
+      if (!options.length) return;
+      let index = options.findIndex((o) => o.classList.contains("active"));
+      options[index]?.classList.remove("active");
+      index = (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+      options[index].classList.add("active");
+      options[index].scrollIntoView({ block: "nearest" });
+    } else if (event.key === "Enter" && open) {
+      event.preventDefault();
+      const active = listEl.querySelector(".combo-option.active");
+      if (active) pickCombo(combo, active.dataset.id);
+    }
+  });
+  window.addEventListener("scroll", (event) => {
+    if (event.target instanceof Element && event.target.closest(".combo-list")) return;
+    closeCombos();
+  }, true);
+  window.addEventListener("resize", closeCombos);
+}
+
 function showToast(message, type = "success") {
   const toast = document.createElement("div");
   toast.className = `toast${type === "error" ? " error" : ""}`;
@@ -231,7 +360,7 @@ function showModal(title, body, options = {}) {
       if (event.target === button || button.closest(".modal-header")) modalRoot.innerHTML = "";
     });
   });
-  modalRoot.querySelector("input, select, button")?.focus();
+  modalRoot.querySelector(".modal-body input:not([type=hidden]), .modal-body select")?.focus();
 }
 
 function closeModal() {
@@ -303,7 +432,7 @@ function renderDashboard() {
 
 function renderEntity(entity) {
   const config = entityConfig[entity];
-  const rows = list(config.collection).filter((row) => !state.filter || Object.values(row).some((value) => String(value ?? "").toLowerCase().includes(state.filter.toLowerCase())));
+  const rows = list(config.collection).filter((row) => matchesFilter(Object.values(row).filter((value) => typeof value !== "object")));
   pageContent.innerHTML = `
     ${pageHeading(config.title, `إدارة بيانات ${config.title.toLowerCase()} وتحديثها.`, `<button class="button button-primary" data-action="add-entity" data-entity="${entity}">＋ ${config.add}</button>`)}
     <section class="card card-pad">
@@ -322,7 +451,7 @@ function entityTable(entity, rows) {
 
 function renderInvoices(type) {
   const title = type === "sales" ? "فواتير المبيعات" : "فواتير المشتريات";
-  const rows = list(type).filter((row) => !state.filter || `${row.number} ${row.partnerName}`.toLowerCase().includes(state.filter.toLowerCase())).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const rows = list(type).filter((row) => matchesFilter([row.number, row.partnerName, row.date, row.note, row.total])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   pageContent.innerHTML = `
     ${pageHeading(title, "عرض ومتابعة الفواتير المسجلة.", `<button class="button button-primary" data-action="new-${type === "sales" ? "sale" : "purchase"}">＋ فاتورة جديدة</button>`)}
     <section class="card card-pad"><div class="toolbar"><input class="toolbar-search" data-filter placeholder="ابحث برقم الفاتورة أو اسم الجهة" value="${escapeHTML(state.filter)}" /><span class="muted">${number(rows.length)} فاتورة</span></div>${invoiceTable(rows, type)}</section>`;
@@ -334,33 +463,33 @@ function invoiceTable(rows, type, compact = false) {
 }
 
 function renderPayments() {
-  const rows = [...list("payments")].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const rows = [...list("payments")].filter((row) => matchesFilter([row.number, row.type, row.date, row.partyName, row.cashboxName, row.note, row.amount])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   pageContent.innerHTML = `
     ${pageHeading("سندات القبض والصرف", "سجّل المقبوضات والمدفوعات وتابع حركة الخزينة.", `<button class="button button-primary" data-action="new-payment">＋ سند جديد</button>`)}
-    <section class="card card-pad"><div class="table-wrap">${rows.length ? `<table><thead><tr><th>رقم السند</th><th>النوع</th><th>التاريخ</th><th>الجهة</th><th>الخزينة</th><th>المبلغ</th><th>البيان</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td><span class="badge${row.type === "صرف" ? " warning" : ""}">${escapeHTML(row.type)}</span></td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.partyName || "—")}</td><td>${escapeHTML(row.cashboxName || "—")}</td><td>${money(row.amount)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-state"><strong>لا توجد سندات</strong>أضف سند قبض أو صرف لتسجيل الحركة.</div>`}</div></section>`;
+    <section class="card card-pad">${searchBar("ابحث برقم السند أو الجهة أو البيان", rows.length, "سند")}<div class="table-wrap">${rows.length ? `<table><thead><tr><th>رقم السند</th><th>النوع</th><th>التاريخ</th><th>الجهة</th><th>الخزينة</th><th>المبلغ</th><th>البيان</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td><span class="badge${row.type === "صرف" ? " warning" : ""}">${escapeHTML(row.type)}</span></td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.partyName || "—")}</td><td>${escapeHTML(row.cashboxName || "—")}</td><td>${money(row.amount)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-state"><strong>لا توجد سندات</strong>أضف سند قبض أو صرف لتسجيل الحركة.</div>`}</div></section>`;
 }
 
 function renderExpenses() {
-  const rows = [...list("expenses")].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const rows = [...list("expenses")].filter((row) => matchesFilter([row.number, row.date, row.typeName, row.description, row.cashboxName, row.total])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
   pageContent.innerHTML = `
     ${pageHeading("المصروفات", "سجّل مصروفات المنشأة وراجع تفاصيلها.", `<button class="button button-primary" data-action="new-expense">＋ تسجيل مصروف</button>`)}
     <div class="stock-summary"><div class="summary-chip"><span>إجمالي المصروفات المسجلة</span><strong>${money(total)}</strong></div><div class="summary-chip"><span>عدد المصروفات</span><strong>${number(rows.length)}</strong></div></div>
-    <section class="card card-pad">${rows.length ? `<div class="table-wrap"><table><thead><tr><th>رقم المصروف</th><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>الإجمالي</th><th>الخزينة</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.typeName)}</td><td>${escapeHTML(row.description || "—")}</td><td>${money(row.total)}</td><td>${escapeHTML(row.cashboxName || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد مصروفات</strong>سجّل المصروفات لمتابعة تكاليف التشغيل.</div>`}</section>`;
+    <section class="card card-pad">${searchBar("ابحث بنوع المصروف أو التفاصيل", rows.length, "مصروف")}${rows.length ? `<div class="table-wrap"><table><thead><tr><th>رقم المصروف</th><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>الإجمالي</th><th>الخزينة</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.typeName)}</td><td>${escapeHTML(row.description || "—")}</td><td>${money(row.total)}</td><td>${escapeHTML(row.cashboxName || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد مصروفات</strong>سجّل المصروفات لمتابعة تكاليف التشغيل.</div>`}</section>`;
 }
 
 function renderInventory() {
   const items = list("items");
   const stockValue = items.reduce((sum, row) => sum + Number(row.quantity || 0) * Number(row.costPrice || 0), 0);
-  const moves = [...list("stockMoves")].sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 30);
+  const moves = [...list("stockMoves")].filter((row) => matchesFilter([row.number, row.date, row.itemName, row.type, row.note])).sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 50);
   pageContent.innerHTML = `
     ${pageHeading("حركة المخزون", "تابع أرصدة الأصناف وسجّل التسويات المخزنية.", `<button class="button button-primary" data-action="new-stock-move">＋ تسوية مخزون</button>`)}
     <div class="stock-summary"><div class="summary-chip"><span>عدد الأصناف</span><strong>${number(items.length)}</strong></div><div class="summary-chip"><span>قيمة المخزون بالتكلفة</span><strong>${money(stockValue)}</strong></div><div class="summary-chip"><span>حركات مسجلة</span><strong>${number(list("stockMoves").length)}</strong></div></div>
-    <section class="card card-pad"><div class="card-title"><h3>آخر الحركات</h3></div>${moves.length ? `<div class="table-wrap"><table><thead><tr><th>رقم الحركة</th><th>التاريخ</th><th>الصنف</th><th>نوع الحركة</th><th>الكمية</th><th>البيان</th></tr></thead><tbody>${moves.map((row) => `<tr><td>${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.itemName)}</td><td>${escapeHTML(row.type)}</td><td>${number(row.quantity)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد حركات مخزنية</strong>ستظهر هنا التسويات التي تسجلها.</div>`}</section>`;
+    <section class="card card-pad"><div class="card-title"><h3>آخر الحركات</h3></div>${searchBar("ابحث باسم الصنف أو نوع الحركة", moves.length, "حركة")}${moves.length ? `<div class="table-wrap"><table><thead><tr><th>رقم الحركة</th><th>التاريخ</th><th>الصنف</th><th>نوع الحركة</th><th>الكمية</th><th>البيان</th></tr></thead><tbody>${moves.map((row) => `<tr><td>${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.itemName)}</td><td>${escapeHTML(row.type)}</td><td>${number(row.quantity)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد حركات مخزنية</strong>ستظهر هنا التسويات التي تسجلها.</div>`}</section>`;
 }
 
 function renderReports() {
-  const report = state.report;
+  const report = state.report ? { ...state.report, rows: list(state.report.type).filter((row) => row.date >= state.report.from && row.date <= state.report.to).sort((a, b) => String(b.date).localeCompare(String(a.date))) } : null;
   pageContent.innerHTML = `
     ${pageHeading("مركز التقارير", "استعرض حركة المبيعات والمشتريات خلال فترة محددة.")}
     <section class="card card-pad">
@@ -380,10 +509,11 @@ function reportMarkup(report) {
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
   const tax = rows.reduce((sum, row) => sum + Number(row.vatAmount || 0), 0);
   const count = rows.length;
+  const profit = report.type === "sales" ? rows.reduce((sum, row) => sum + (row.lines || []).reduce((s, line) => s + Number(line.net || 0) - Number(line.costPrice || 0) * Number(line.quantity || 0), 0), 0) : null;
   const table = report.type === "expenses"
     ? `<div class="table-wrap"><table><thead><tr><th>رقم المصروف</th><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>الضريبة</th><th>الإجمالي</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.typeName)}</td><td>${escapeHTML(row.description || "—")}</td><td>${money(row.vatAmount)}</td><td>${money(row.total)}</td></tr>`).join("")}</tbody></table></div>`
     : invoiceTable(rows, report.type);
-  return `<div id="report-output"><div class="stock-summary"><div class="summary-chip"><span>عدد المستندات</span><strong>${number(count)}</strong></div><div class="summary-chip"><span>الإجمالي</span><strong>${money(total)}</strong></div><div class="summary-chip"><span>ضريبة القيمة المضافة</span><strong>${money(tax)}</strong></div></div>${rows.length ? table : `<div class="empty-state">لا توجد نتائج في الفترة المختارة.</div>`}</div>`;
+  return `<div id="report-output"><div class="stock-summary"><div class="summary-chip"><span>عدد المستندات</span><strong>${number(count)}</strong></div><div class="summary-chip"><span>الإجمالي</span><strong>${money(total)}</strong></div><div class="summary-chip"><span>ضريبة القيمة المضافة</span><strong>${money(tax)}</strong></div>${profit !== null ? `<div class="summary-chip"><span>الربح التقديري (قبل المصروفات)</span><strong>${money(profit)}</strong></div>` : ""}</div>${rows.length ? table : `<div class="empty-state">لا توجد نتائج في الفترة المختارة.</div>`}</div>`;
 }
 
 function renderSettings() {
@@ -476,7 +606,7 @@ function openInvoice(type) {
     <form id="invoice-form">
       <div class="form-grid cols-3">
         <label>التاريخ<input name="date" type="date" value="${isoToday()}" required /></label>
-        <label>${partnerLabel}<select name="partnerId">${optionsFor(partnerCollection, "", isSale ? "عميل نقدي" : "مورد اختياري")}</select></label>
+        <label>${partnerLabel}${comboHTML({ name: "partnerId", source: partnerCollection, placeholder: isSale ? "عميل نقدي — اكتب للبحث" : "اكتب للبحث عن المورد" })}</label>
         <label>المخزن<select name="warehouseId">${optionsFor("warehouses", "")}</select></label>
         <label>الخزينة / البنك<select name="cashboxId">${cashOptions}</select></label>
         <label>المدفوع الآن<input name="paid" type="number" min="0" step="0.01" value="0" /></label>
@@ -492,21 +622,21 @@ function openInvoice(type) {
   const form = modalRoot.querySelector("#invoice-form");
   const lines = form.querySelector("[data-lines]");
 
-  function addLine() {
+  const lineItem = (row) => list("items").find((entry) => entry.id === row.querySelector(".line-item").value);
+  function addLine(focus = false) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td><select class="line-item" required><option value="">اختر الصنف</option>${list("items").map((item) => `<option value="${escapeHTML(item.id)}" data-price="${Number(isSale ? item.salePrice : item.costPrice)}" data-vat="${Number(item.vatRate ?? state.company.vatRate ?? 15)}">${escapeHTML(item.name)} — ${escapeHTML(item.code || "")}</option>`).join("")}</select></td><td><input class="line-qty" type="number" min="0.001" step="any" value="1" required /></td><td><input class="line-price" type="number" min="0" step="0.01" value="0" required /></td><td><input class="line-discount" type="number" min="0" max="100" step="0.01" value="0" /></td><td class="line-total">0.00</td><td><button class="small-button" type="button" data-remove-line>حذف</button></td>`;
+    row.innerHTML = `<td>${comboHTML({ source: "items", className: "line-item", placeholder: "ابحث بالاسم أو الكود أو الباركود" })}</td><td><input class="line-qty" type="number" min="0.001" step="any" value="1" required /></td><td><input class="line-price" type="number" min="0" step="0.01" value="0" required /></td><td><input class="line-discount" type="number" min="0" max="100" step="0.01" value="0" /></td><td class="line-total">0.00</td><td><button class="small-button" type="button" data-remove-line>حذف</button></td>`;
     lines.append(row);
-    updateLine(row, true);
+    updateLine(row);
+    if (focus) row.querySelector(".combo-input").focus();
   }
-  function updateLine(row, resetPrice = false) {
-    const option = row.querySelector(".line-item").selectedOptions[0];
-    if (resetPrice && option?.value) {
-      row.querySelector(".line-price").value = option.dataset.price || 0;
-    }
+  function updateLine(row, itemChanged = false) {
+    const item = lineItem(row);
+    if (itemChanged && item) row.querySelector(".line-price").value = Number(isSale ? item.salePrice : item.costPrice) || 0;
     const qty = Number(row.querySelector(".line-qty").value || 0);
     const price = Number(row.querySelector(".line-price").value || 0);
     const discount = Math.min(100, Math.max(0, Number(row.querySelector(".line-discount").value || 0)));
-    const rate = Number(option?.dataset.vat || state.company.vatRate || 15) / 100;
+    const rate = Number(item?.vatRate ?? state.company.vatRate ?? 15) / 100;
     const net = roundMoney(qty * price * (1 - discount / 100));
     row.querySelector(".line-total").textContent = (net + roundMoney(net * rate)).toFixed(2);
     updateTotals();
@@ -515,10 +645,10 @@ function openInvoice(type) {
     let subtotal = 0;
     let tax = 0;
     [...lines.querySelectorAll("tr")].forEach((row) => {
-      const option = row.querySelector(".line-item").selectedOptions[0];
+      const item = lineItem(row);
       const net = roundMoney(Number(row.querySelector(".line-qty").value || 0) * Number(row.querySelector(".line-price").value || 0) * (1 - Number(row.querySelector(".line-discount").value || 0) / 100));
       subtotal += net;
-      tax += roundMoney(net * Number(option?.dataset.vat || state.company.vatRate || 15) / 100);
+      tax += roundMoney(net * Number(item?.vatRate ?? state.company.vatRate ?? 15) / 100);
     });
     const total = subtotal + tax;
     const paid = Number(form.elements.paid.value || 0);
@@ -527,10 +657,14 @@ function openInvoice(type) {
     form.querySelector("[data-total]").textContent = total.toFixed(2);
     form.querySelector("[data-due]").textContent = Math.max(0, total - paid).toFixed(2);
   }
-  form.querySelector("[data-add-line]").addEventListener("click", addLine);
+  form.querySelector("[data-add-line]").addEventListener("click", () => addLine(true));
+  form.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.matches("input")) event.preventDefault(); });
   lines.addEventListener("change", (event) => {
     const row = event.target.closest("tr");
-    if (row) updateLine(row, event.target.matches(".line-item"));
+    if (!row) return;
+    const isItem = event.target.matches(".line-item");
+    updateLine(row, isItem);
+    if (isItem && event.target.value) row.querySelector(".line-qty").select();
   });
   lines.addEventListener("input", (event) => {
     const row = event.target.closest("tr");
@@ -564,7 +698,7 @@ function openInvoice(type) {
         const net = roundMoney(qty * price * (1 - discountRate / 100));
         const vatRate = Number(item.vatRate ?? state.company.vatRate ?? 15);
         const vatLine = roundMoney(net * vatRate / 100);
-        return { itemId: item.id, itemName: item.name, code: item.code || "", quantity: qty, price, discountRate, net, vatRate, vatAmount: vatLine, total: net + vatLine, costPrice: Number(item.costPrice || 0) };
+        return { itemId: item.id, itemName: item.name, code: item.code || "", quantity: qty, price, discountRate, net, vatRate, vatAmount: vatLine, total: roundMoney(net + vatLine), costPrice: Number(item.costPrice || 0) };
       });
       if (!itemLines.length) throw new Error("أضف بندًا واحدًا على الأقل.");
       const subtotal = roundMoney(itemLines.reduce((sum, line) => sum + line.net, 0));
@@ -604,7 +738,7 @@ async function saveInvoice(type, data) {
   const prefix = type === "sales" ? "INV" : "PUR";
   const isSale = type === "sales";
   const partnerCollection = isSale ? "customers" : "suppliers";
-  const partnerDelta = isSale ? data.due : data.due;
+  const partnerDelta = data.due;
   const counterRef = doc(db, "counters", counterName);
   const partnerRef = data.partnerId ? doc(db, partnerCollection, data.partnerId) : null;
   const cashboxRef = data.cashboxId ? doc(db, "cashboxes", data.cashboxId) : null;
@@ -618,6 +752,7 @@ async function saveInvoice(type, data) {
     for (const itemRef of itemRefs) itemSnaps.push(await transaction.get(itemRef));
     if (partnerRef && !partnerSnap.exists()) throw new Error(`${isSale ? "العميل" : "المورد"} غير موجود.`);
     if (cashboxRef && !cashboxSnap.exists()) throw new Error("الخزينة المحددة غير موجودة.");
+    for (const snap of itemSnaps) if (!snap.exists()) throw new Error("أحد الأصناف في الفاتورة لم يعد موجودًا.");
     const itemRecords = new Map(itemSnaps.map((snap) => [snap.id, snap.data()]));
     const quantities = new Map();
     data.lines.forEach((line) => quantities.set(line.itemId, (quantities.get(line.itemId) || 0) + line.quantity));
@@ -635,12 +770,18 @@ async function saveInvoice(type, data) {
     for (const [itemId, quantity] of quantities) {
       const item = itemRecords.get(itemId);
       if (item.trackInventory === false) continue;
+      transaction.set(doc(collection(db, "stockMoves")), {
+        number: numberText, date: data.date, itemId, itemName: item.name,
+        type: isSale ? "بيع" : "شراء", quantity, costPrice: Number(item.costPrice || 0),
+        note: `فاتورة ${isSale ? "مبيعات" : "مشتريات"} ${numberText}`,
+        createdAt: invoice.createdAt, createdBy: state.user.email,
+      });
       if (isSale) {
         transaction.update(doc(db, "items", itemId), { quantity: Number(item.quantity || 0) - quantity });
       } else {
         const previousQty = Number(item.quantity || 0);
         const newQty = previousQty + quantity;
-        const weightedCost = (previousQty * Number(item.costPrice || 0) + quantity * data.lines.filter((line) => line.itemId === itemId).reduce((sum, line) => sum + line.price * line.quantity, 0)) / (newQty || 1);
+        const weightedCost = (previousQty * Number(item.costPrice || 0) + quantity * data.lines.filter((line) => line.itemId === itemId).reduce((sum, line) => sum + line.net, 0)) / (newQty || 1);
         transaction.update(doc(db, "items", itemId), { quantity: newQty, costPrice: weightedCost });
       }
     }
@@ -659,17 +800,25 @@ function openPaymentForm() {
     <label>التاريخ<input name="date" type="date" value="${isoToday()}" required /></label>
     <label>الخزينة / البنك<select name="cashboxId" required>${optionsFor("cashboxes", "", "اختر الخزينة")}</select></label>
     <label>الجهة<select name="partyType"><option value="">جهة أخرى</option><option value="customers">عميل</option><option value="suppliers">مورد</option></select></label>
-    <label>اسم الجهة<select name="partyId"><option value="">— اختياري —</option></select></label>
+    <label>اسم الجهة${comboHTML({ name: "partyId", source: "none", placeholder: "اختر نوع الجهة أولًا" })}</label>
     <label>المبلغ<input name="amount" type="number" min="0.01" step="0.01" required /></label>
     <label class="span-2">البيان<input name="note" /></label>
     <p class="modal-error span-2" data-error></p>
   </form>`;
   showModal("سند قبض أو صرف", body, { small: true, footer });
   const form = modalRoot.querySelector("#payment-form");
-  form.elements.partyType.addEventListener("change", () => {
-    const source = form.elements.partyType.value;
-    form.elements.partyId.innerHTML = `<option value="">— اختياري —</option>${source ? list(source).map((row) => `<option value="${escapeHTML(row.id)}">${escapeHTML(row.name)}</option>`).join("") : ""}`;
-  });
+  const partyCombo = form.querySelector("[data-combo]");
+  const syncPartyCombo = () => {
+    const source = form.elements.partyType.value || "none";
+    const input = partyCombo.querySelector(".combo-input");
+    partyCombo.dataset.source = source;
+    input.value = "";
+    partyCombo.querySelector(".combo-value").value = "";
+    input.disabled = source === "none";
+    input.placeholder = source === "none" ? "اختر نوع الجهة أولًا" : "اكتب للبحث (اختياري)";
+  };
+  form.elements.partyType.addEventListener("change", syncPartyCombo);
+  syncPartyCombo();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = modalRoot.querySelector('[form="payment-form"]');
@@ -705,7 +854,7 @@ function openPaymentForm() {
         const sign = type === "قبض" ? 1 : -1;
         transaction.update(cashboxRef, { balance: Number(cashSnap.data().balance ?? cashSnap.data().openingBalance ?? 0) + sign * amount });
         if (partyRef && partySnap.exists()) {
-          const balanceSign = partyType === "customers" ? -1 : -1;
+          const balanceSign = partyType === "customers" ? (type === "قبض" ? -1 : 1) : (type === "صرف" ? -1 : 1);
           transaction.update(partyRef, { balance: Number(partySnap.data().balance ?? partySnap.data().openingBalance ?? 0) + balanceSign * amount });
         }
       });
@@ -779,7 +928,7 @@ function openStockMoveForm() {
   const body = `<form id="stock-form" class="form-grid">
     <label>التاريخ<input name="date" type="date" value="${isoToday()}" required /></label>
     <label>نوع الحركة<select name="type"><option value="زيادة">زيادة مخزون</option><option value="تسوية نقص">تسوية نقص</option></select></label>
-    <label class="span-2">الصنف<select name="itemId" required>${optionsFor("items", "", "اختر الصنف")}</select></label>
+    <label class="span-2">الصنف${comboHTML({ name: "itemId", source: "items", placeholder: "ابحث بالاسم أو الكود أو الباركود" })}</label>
     <label>الكمية<input name="quantity" type="number" min="0.001" step="any" required /></label>
     <label>التكلفة للوحدة<input name="costPrice" type="number" min="0" step="0.01" /></label>
     <label class="span-2">البيان<input name="note" /></label>
@@ -809,7 +958,9 @@ function openStockMoveForm() {
         const currentQty = Number(itemSnap.data().quantity || 0);
         if (type === "تسوية نقص" && quantity > currentQty) throw new Error("لا يمكن صرف كمية أكبر من الرصيد الحالي.");
         const nextQty = currentQty + (type === "زيادة" ? quantity : -quantity);
-        transaction.update(itemRef, { quantity: nextQty, ...(type === "زيادة" && costPrice > 0 ? { costPrice } : {}) });
+        const oldCost = Number(itemSnap.data().costPrice || 0);
+        const avgCost = type === "زيادة" && costPrice > 0 ? roundMoney((currentQty * oldCost + quantity * costPrice) / (nextQty || 1)) : oldCost;
+        transaction.update(itemRef, { quantity: nextQty, costPrice: avgCost });
         transaction.set(moveRef, {
           number: makeCode("STK"), date: form.elements.date.value, itemId: item.id,
           itemName: item.name, type, quantity, costPrice, note: form.elements.note.value.trim(),
@@ -844,9 +995,9 @@ async function deleteEntity(entity, id) {
     const linked = entity === "items"
     ? [...list("sales"), ...list("purchases")].some((invoice) => (invoice.lines || []).some((line) => line.itemId === id)) || list("stockMoves").some((move) => move.itemId === id)
     : entity === "customers"
-      ? list("sales").some((invoice) => invoice.partnerId === id)
+      ? [...list("sales"), ...list("payments")].some((record) => record.partnerId === id || record.partyId === id)
       : entity === "suppliers"
-        ? list("purchases").some((invoice) => invoice.partnerId === id)
+        ? [...list("purchases"), ...list("payments")].some((record) => record.partnerId === id || record.partyId === id)
         : entity === "cashboxes"
           ? [...list("sales"), ...list("purchases"), ...list("expenses"), ...list("payments")].some((record) => record.cashboxId === id)
           : entity === "warehouses"
@@ -857,7 +1008,6 @@ async function deleteEntity(entity, id) {
     }
     const snapshot = await getDoc(doc(db, config.collection, id));
     if (entity === "items" && Number(snapshot.data()?.quantity || 0) !== 0) throw new Error("لا يمكن حذف صنف له رصيد مخزني؛ استخدم تسوية المخزون أولًا.");
-    const { deleteDoc } = await import("https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js");
     await deleteDoc(doc(db, config.collection, id));
     showToast("تم حذف السجل.");
   } catch (error) {
@@ -932,7 +1082,7 @@ function bindPageEvents() {
     }
   });
   pageContent.addEventListener("change", (event) => {
-    if (event.target.matches('[data-action="import-data"]')) importData(event.target.files?.[0]);
+    if (event.target.matches('[data-action="import-data"]')) { const input = event.target; importData(input.files?.[0]).finally(() => { input.value = ""; }); }
   });
 }
 
@@ -959,7 +1109,7 @@ function startLiveSync() {
   for (const collectionName of Object.keys(state.collections)) {
     const unsubscribe = onSnapshot(collection(db, collectionName), (snapshot) => {
       state.collections[collectionName] = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
-      if (state.user) renderPage();
+      scheduleRender();
     }, (error) => {
       showToast(explainError(error), "error");
     });
@@ -967,7 +1117,7 @@ function startLiveSync() {
   }
   const settingsUnsubscribe = onSnapshot(doc(db, "settings", "company"), (snapshot) => {
     if (snapshot.exists()) state.company = { ...state.company, ...snapshot.data() };
-    if (state.user) renderPage();
+    scheduleRender();
   }, (error) => showToast(explainError(error), "error"));
   state.unsubscribers.push(settingsUnsubscribe);
 }
@@ -989,19 +1139,25 @@ async function refreshData() {
   }
 }
 
-function exportData() {
-  const payload = {
-    exportedAt: new Date().toISOString(),
-    company: state.company,
-    collections: state.collections,
-  };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `daftar-backup-${isoToday()}.json`;
-  link.click();
-  URL.revokeObjectURL(link.href);
-  showToast("تم تنزيل النسخة الاحتياطية.");
+async function exportData() {
+  try {
+    const countersSnap = await getDocs(collection(db, "counters"));
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      company: state.company,
+      collections: state.collections,
+      counters: Object.fromEntries(countersSnap.docs.map((entry) => [entry.id, entry.data()])),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `daftar-backup-${isoToday()}.json`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    showToast("تم تنزيل النسخة الاحتياطية.");
+  } catch (error) {
+    showToast(explainError(error), "error");
+  }
 }
 
 async function importData(file) {
@@ -1021,6 +1177,11 @@ async function importData(file) {
         return setDoc(doc(db, collectionName, id), data, { merge: true });
       }));
     }
+    if (payload.counters && typeof payload.counters === "object") {
+      const current = await getDocs(collection(db, "counters"));
+      const currentValues = Object.fromEntries(current.docs.map((entry) => [entry.id, Number(entry.data().value || 0)]));
+      await Promise.all(["sales", "purchases", "payments", "expenses"].filter((id) => payload.counters[id]).map((id) => setDoc(doc(db, "counters", id), { value: Math.max(currentValues[id] || 0, Number(payload.counters[id].value || 0)) }, { merge: true })));
+    }
     if (payload.company) await setDoc(doc(db, "settings", "company"), payload.company, { merge: true });
     showToast("تم استعادة بيانات النسخة.");
   } catch (error) {
@@ -1031,7 +1192,12 @@ async function importData(file) {
 async function checkAuthorization(user) {
   const membership = await getDoc(doc(db, "authorizedUsers", user.uid));
   if (!membership.exists()) {
-    loginMessage.textContent = `الحساب صحيح، لكن لا توجد له صلاحية في Firestore. أنشئ مستندًا في authorizedUsers واجعل معرّف المستند هذا UID نفسه: ${user.uid}`;
+    loginMessage.innerHTML = `<div class="access-denied"><strong>ليس لديك صلاحية الوصول.</strong><p>أضف مستندًا في مجموعة authorizedUsers من Firebase Console، واجعل معرّف المستند هو الـ UID التالي:</p><div class="uid-row"><input type="text" readonly value="${escapeHTML(user.uid)}" dir="ltr" /><button type="button" class="button button-outline" data-copy-uid>نسخ</button></div></div>`;
+    loginMessage.querySelector("[data-copy-uid]").addEventListener("click", async () => {
+      const field = loginMessage.querySelector(".uid-row input");
+      try { await navigator.clipboard.writeText(user.uid); } catch { field.select(); document.execCommand("copy"); }
+      showToast("تم نسخ الـ UID.");
+    });
     await signOut(auth);
     return false;
   }
@@ -1066,6 +1232,7 @@ document.querySelector(".brand").addEventListener("click", (event) => {
 });
 document.querySelector("#mobile-menu").addEventListener("click", () => document.querySelector(".sidebar").classList.toggle("mobile-open"));
 bindPageEvents();
+bindComboEvents();
 
 document.querySelector("#today-label").textContent = new Intl.DateTimeFormat("ar-SA", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
 
@@ -1076,6 +1243,9 @@ if (!isConfigured) {
   onAuthStateChanged(auth, async (user) => {
     if (!user) {
       state.user = null;
+      Object.keys(state.collections).forEach((key) => { state.collections[key] = []; });
+      state.report = null;
+      modalRoot.innerHTML = "";
       state.unsubscribers.forEach((unsubscribe) => unsubscribe());
       state.unsubscribers = [];
       appShell.classList.add("is-hidden");
@@ -1097,25 +1267,3 @@ if (!isConfigured) {
     }
   });
 }
-// ... existing code ...
-async function checkAuthorization(user) {
-  const membership = await getDoc(doc(db, "authorizedUsers", user.uid));
-  if (!membership.exists()) {
-    loginMessage.innerHTML = `
-      <div style="background: #fff0ef; border: 1px solid #fecaca; padding: 12px; border-radius: 10px; margin-top: 10px; text-align: right;">
-        <p style="color: #c94f53; font-weight: bold; margin: 0 0 6px 0;">ليس لديك صلاحية الوصول.</p>
-        <p style="font-size: 11px; color: #555; margin: 0 0 8px 0;">تأكد من إضافة UID المستخدم إلى authorizedUsers في Firebase Console.</p>
-        <div style="display: flex; gap: 6px; align-items: center;">
-          <input type="text" readonly value="${user.uid}" id="uid-input" style="font-family: monospace; font-size: 11px; padding: 4px 8px; direction: ltr; text-align: left;" />
-          <button type="button" class="button button-outline" style="min-height: 30px; padding: 2px 10px; font-size: 11px;" onclick="document.getElementById('uid-input').select(); document.execCommand('copy'); alert('تم نسخ الـ UID!');">نسخ</button>
-        </div>
-      </div>
-    `;
-    await signOut(auth);
-    return false;
-  }
-  return true;
-}
-
-loginForm.addEventListener("submit", async (event) => {
-// ... existing code ...
