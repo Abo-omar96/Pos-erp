@@ -53,6 +53,10 @@ const state = {
   filter: "",
   report: null,
   statement: null,
+  themeDraft: null,
+  themeDirty: false,
+  themeScope: "",
+  themeApplied: null,
   analytics: null,
   unsubscribers: [],
 };
@@ -409,6 +413,7 @@ function setPage(page) {
 
 function renderPage() {
   if (!state.user) return;
+  syncThemeBar();
   const renderers = {
     dashboard: renderDashboard,
     sales: () => renderInvoices("sales"),
@@ -567,6 +572,231 @@ function reportMarkup(report) {
   return `<div id="report-output"><div class="stock-summary"><div class="summary-chip"><span>عدد المستندات</span><strong>${number(count)}</strong></div><div class="summary-chip"><span>الإجمالي</span><strong>${money(total)}</strong></div><div class="summary-chip"><span>ضريبة القيمة المضافة</span><strong>${money(tax)}</strong></div>${profit !== null ? `<div class="summary-chip"><span>الربح التقديري (قبل المصروفات)</span><strong>${money(profit - returnsProfit)}</strong></div>` : ""}${returnChips}</div>${rows.length ? trendChart(report) : ""}${rows.length ? table : `<div class="empty-state">لا توجد نتائج في الفترة المختارة.</div>`}</div>`;
 }
 
+// ================= المظهر والتنسيق =================
+const CHART_COLORS = ["#4f46e5", "#10b981", "#f59e0b", "#f43f5e", "#0ea5e9", "#8b5cf6", "#14b8a6", "#64748b"];
+const THEME_KEY = "daftar.theme";
+const THEME_DEFAULT = { primary: "#4f46e5", sidebar: "#1e1b4b", bg: "#f5f6fd", card: "#ffffff", ink: "#1f2340", fontScale: 1, font: "Cairo", radius: "medium", density: "normal" };
+const THEME_PRESETS = [
+  { id: "indigo", name: "نيلي (الافتراضي)", primary: "#4f46e5", sidebar: "#1e1b4b", bg: "#f5f6fd", card: "#ffffff", ink: "#1f2340" },
+  { id: "emerald", name: "أخضر", primary: "#059669", sidebar: "#064e3b", bg: "#f3faf7", card: "#ffffff", ink: "#12332b" },
+  { id: "ocean", name: "أزرق", primary: "#0369a1", sidebar: "#0c2d48", bg: "#f2f7fb", card: "#ffffff", ink: "#10283b" },
+  { id: "amber", name: "برتقالي", primary: "#d9480f", sidebar: "#3b1f0e", bg: "#fbf7f2", card: "#ffffff", ink: "#33200f" },
+  { id: "rose", name: "وردي", primary: "#be185d", sidebar: "#4a0d2b", bg: "#fcf4f8", card: "#ffffff", ink: "#3a1226" },
+  { id: "slate", name: "رمادي هادئ", primary: "#334155", sidebar: "#0f172a", bg: "#f1f5f9", card: "#ffffff", ink: "#0f172a" },
+  { id: "light-side", name: "قائمة فاتحة", primary: "#2563eb", sidebar: "#ffffff", bg: "#f4f6fb", card: "#ffffff", ink: "#1e293b" },
+  { id: "dark", name: "داكن", primary: "#818cf8", sidebar: "#0b0c18", bg: "#11121f", card: "#1a1c2e", ink: "#e7e9f6" },
+];
+const THEME_FONTS = [
+  { id: "Cairo", name: "Cairo (الافتراضي)", google: "Cairo:wght@400;500;600;700;800" },
+  { id: "Tajawal", name: "Tajawal", google: "Tajawal:wght@400;500;700;800" },
+  { id: "Almarai", name: "Almarai", google: "Almarai:wght@400;700;800" },
+  { id: "IBM Plex Sans Arabic", name: "IBM Plex Sans Arabic", google: "IBM+Plex+Sans+Arabic:wght@400;500;600;700" },
+  { id: "Noto Naskh Arabic", name: "Noto Naskh Arabic (نسخ)", google: "Noto+Naskh+Arabic:wght@400;500;600;700" },
+  { id: "system", name: "خط النظام (Tahoma)", google: "" },
+];
+const THEME_RADIUS = { sharp: 0.3, medium: 1, round: 1.6 };
+const THEME_DENSITY = { compact: [7, 10], normal: [11, 13], comfy: [15, 16] };
+const THEME_COLOR_FIELDS = [["primary", "اللون الأساسي (الأزرار والتمييز)"], ["sidebar", "لون القائمة الجانبية"], ["bg", "لون خلفية الصفحة"], ["card", "لون البطاقات والجداول"], ["ink", "لون النص"]];
+
+const isHexColor = (value) => /^#[0-9a-f]{6}$/i.test(String(value || ""));
+const hexToRgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+const luminance = (hex) => {
+  const [r, g, b] = hexToRgb(hex).map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+};
+const contrastRatio = (a, b) => { const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x); return (hi + 0.05) / (lo + 0.05); };
+const darkenHex = (hex, amount) => `#${hexToRgb(hex).map((v) => Math.round(v * (1 - amount)).toString(16).padStart(2, "0")).join("")}`;
+
+function sanitizeTheme(raw) {
+  const t = { ...THEME_DEFAULT };
+  if (raw && typeof raw === "object") {
+    for (const [key] of THEME_COLOR_FIELDS) if (isHexColor(raw[key])) t[key] = String(raw[key]).toLowerCase();
+    const scale = Number(raw.fontScale);
+    if (Number.isFinite(scale)) t.fontScale = Math.min(1.4, Math.max(0.8, Math.round(scale * 100) / 100));
+    if (THEME_FONTS.some((f) => f.id === raw.font)) t.font = raw.font;
+    if (raw.radius in THEME_RADIUS) t.radius = raw.radius;
+    if (raw.density in THEME_DENSITY) t.density = raw.density;
+  }
+  return t;
+}
+const readLocalTheme = () => {
+  try { const parsed = JSON.parse(localStorage.getItem(THEME_KEY) || "null"); return parsed && typeof parsed === "object" ? parsed : null; } catch { return null; }
+};
+const writeLocalTheme = (value) => {
+  try { if (value) localStorage.setItem(THEME_KEY, JSON.stringify(value)); else localStorage.removeItem(THEME_KEY); } catch { /* ignore */ }
+};
+const effectiveTheme = () => {
+  const local = readLocalTheme();
+  if (local?.scope === "device") return sanitizeTheme(local.theme);
+  return sanitizeTheme(state.company.theme || local?.theme);
+};
+const themePrimary = () => state.themeApplied?.primary || THEME_DEFAULT.primary;
+const printAccent = () => (luminance(themePrimary()) > 0.4 ? darkenHex(themePrimary(), 0.45) : themePrimary());
+
+function ensureThemeFont(fontId) {
+  const font = THEME_FONTS.find((f) => f.id === fontId);
+  if (!font?.google || document.getElementById(`font-${font.google.split(":")[0]}`)) return;
+  const link = document.createElement("link");
+  link.id = `font-${font.google.split(":")[0]}`;
+  link.rel = "stylesheet";
+  link.href = `https://fonts.googleapis.com/css2?family=${font.google}&display=swap`;
+  document.head.append(link);
+}
+
+function applyTheme(raw) {
+  const t = sanitizeTheme(raw);
+  const style = document.documentElement.style;
+  style.setProperty("--primary", t.primary);
+  style.setProperty("--sidebar", t.sidebar);
+  style.setProperty("--bg", t.bg);
+  style.setProperty("--card", t.card);
+  style.setProperty("--ink", t.ink);
+  style.setProperty("--on-primary", contrastRatio("#ffffff", t.primary) >= contrastRatio("#111827", t.primary) ? "#ffffff" : "#111827");
+  style.setProperty("--sidebar-ink", luminance(t.sidebar) > 0.45 ? "#1e293b" : "#ffffff");
+  style.setProperty("--fs", String(t.fontScale));
+  style.setProperty("--r", String(THEME_RADIUS[t.radius]));
+  style.setProperty("--cell-y", `${THEME_DENSITY[t.density][0]}px`);
+  style.setProperty("--cell-x", `${THEME_DENSITY[t.density][1]}px`);
+  ensureThemeFont(t.font);
+  style.setProperty("--font", t.font === "system" ? `Tahoma, "Segoe UI", sans-serif` : t.font === "Cairo" ? `"Cairo", Tahoma, sans-serif` : `"${t.font}", "Cairo", Tahoma, sans-serif`);
+  style.colorScheme = luminance(t.bg) < 0.25 ? "dark" : "light";
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", t.primary);
+  CHART_COLORS[0] = t.primary;
+  state.themeApplied = t;
+}
+
+function readThemeForm(form) {
+  const data = Object.fromEntries(new FormData(form));
+  return sanitizeTheme({ ...data, fontScale: Number(data.fontScale) / 100 });
+}
+
+function themeHints(t) {
+  const hints = [];
+  if (contrastRatio(t.ink, t.card) < 4.5) hints.push("لون النص قريب من لون البطاقات، وقد يصعب قراءته.");
+  if (contrastRatio(t.ink, t.bg) < 4.5) hints.push("لون النص قريب من لون الخلفية، وقد يصعب قراءته.");
+  if (contrastRatio(t.primary, t.card) < 3) hints.push("اللون الأساسي قريب من لون البطاقات، وقد لا تظهر العناصر الملونة بوضوح.");
+  return hints;
+}
+
+function renderThemeSection() {
+  const t = state.themeDraft || effectiveTheme();
+  const local = readLocalTheme();
+  const scope = local?.scope === "device" ? "device" : "shared";
+  const swatch = (p) => `<button type="button" class="theme-preset${p.primary === t.primary && p.sidebar === t.sidebar && p.bg === t.bg && p.card === t.card ? " active" : ""}" data-theme-preset="${p.id}" title="${escapeHTML(p.name)}"><span class="theme-swatch" style="background:${p.bg}"><i style="background:${p.sidebar}"></i><i style="background:${p.primary}"></i><i style="background:${p.card};box-shadow:inset 0 0 0 1px ${p.ink}33"></i></span><small>${escapeHTML(p.name)}</small></button>`;
+  return `
+    <section class="card card-pad settings-section" id="theme-section">
+      <h3>المظهر والتنسيق</h3>
+      <p class="muted theme-intro">اختر مظهرًا جاهزًا أو عدّل الألوان والخطوط بنفسك. التغيير يظهر فورًا على الشاشة، ولا يُحفظ إلا بعد الضغط على «حفظ المظهر».</p>
+      <div class="theme-presets">${THEME_PRESETS.map(swatch).join("")}</div>
+      <form id="theme-form">
+        <div class="form-grid cols-3 theme-colors">${THEME_COLOR_FIELDS.map(([key, label]) => `<label class="color-field">${label}<span class="color-row"><input type="color" name="${key}" value="${t[key]}" /><output data-color-out="${key}">${t[key]}</output></span></label>`).join("")}</div>
+        <div class="form-grid cols-3 theme-options">
+          <label>حجم الخط <span class="range-row"><input type="range" name="fontScale" min="80" max="140" step="5" value="${Math.round(t.fontScale * 100)}" /><output data-scale-out>${Math.round(t.fontScale * 100)}%</output></span></label>
+          <label>نوع الخط<select name="font">${THEME_FONTS.map((f) => `<option value="${escapeHTML(f.id)}"${selected(f.id, t.font)}>${escapeHTML(f.name)}</option>`).join("")}</select></label>
+          <label>استدارة الزوايا<select name="radius"><option value="sharp"${selected("sharp", t.radius)}>حادة</option><option value="medium"${selected("medium", t.radius)}>متوسطة</option><option value="round"${selected("round", t.radius)}>دائرية</option></select></label>
+          <label>كثافة الجداول<select name="density"><option value="compact"${selected("compact", t.density)}>مضغوطة (بيانات أكثر)</option><option value="normal"${selected("normal", t.density)}>عادية</option><option value="comfy"${selected("comfy", t.density)}>مريحة (مساحات أكبر)</option></select></label>
+          <label class="span-2">يُطبَّق المظهر على<select name="scope"><option value="shared"${selected("shared", scope)}>جميع مستخدمي المنشأة</option><option value="device"${selected("device", scope)}>هذا الجهاز فقط (مثلًا خط أكبر للجوال)</option></select></label>
+        </div>
+        <div class="theme-preview" aria-hidden="true"><strong>معاينة</strong><button type="button" class="button button-primary" tabindex="-1">زر أساسي</button><button type="button" class="button button-outline" tabindex="-1">زر ثانوي</button><span class="badge">مكتملة</span><span class="badge warning">آجل</span><span class="badge danger">متأخر</span><input value="حقل إدخال" tabindex="-1" readonly /></div>
+        <p class="modal-error" data-theme-hints>${themeHints(t).map(escapeHTML).join("<br>")}</p>
+        <div class="heading-actions theme-actions"><button class="button button-primary">حفظ المظهر</button><button class="button button-outline" type="button" data-action="reset-theme">استعادة المظهر الافتراضي</button></div>
+      </form>
+    </section>`;
+}
+
+async function saveTheme(theme, scope) {
+  if (scope === "shared") {
+    await setDoc(doc(db, "settings", "company"), { theme }, { merge: true });
+    state.company = { ...state.company, theme };
+    writeLocalTheme({ scope: "shared", theme });
+  } else {
+    writeLocalTheme({ scope: "device", theme });
+  }
+  state.themeDirty = false;
+  state.themeDraft = null;
+  applyTheme(theme);
+  syncThemeBar();
+  showToast(scope === "shared" ? "تم حفظ المظهر لجميع المستخدمين." : "تم حفظ المظهر لهذا الجهاز فقط.");
+}
+
+const currentThemeScope = () => state.themeScope || (readLocalTheme()?.scope === "device" ? "device" : "shared");
+function syncThemeBar() {
+  const bar = document.querySelector("#theme-bar");
+  if (bar) bar.classList.toggle("is-hidden", !(state.themeDirty && state.user));
+}
+async function discardThemeDraft() {
+  state.themeDraft = null;
+  state.themeDirty = false;
+  applyTheme(effectiveTheme());
+  syncThemeBar();
+  renderPage();
+}
+
+function bindThemeEvents() {
+  const liveUpdate = (event) => {
+    const form = event.target.closest?.("#theme-form");
+    if (!form) return;
+    const theme = readThemeForm(form);
+    state.themeDraft = theme;
+    state.themeDirty = true;
+    state.themeScope = form.elements.scope.value;
+    applyTheme(theme);
+    syncThemeBar();
+    form.querySelectorAll("[data-color-out]").forEach((out) => { out.textContent = theme[out.dataset.colorOut]; });
+    const scaleOut = form.querySelector("[data-scale-out]");
+    if (scaleOut) scaleOut.textContent = `${Math.round(theme.fontScale * 100)}%`;
+    form.querySelector("[data-theme-hints]").innerHTML = themeHints(theme).map(escapeHTML).join("<br>");
+  };
+  pageContent.addEventListener("input", liveUpdate);
+  pageContent.addEventListener("change", liveUpdate);
+  pageContent.addEventListener("click", (event) => {
+    const preset = event.target.closest("[data-theme-preset]");
+    if (preset) {
+      const chosen = THEME_PRESETS.find((p) => p.id === preset.dataset.themePreset);
+      const base = state.themeDraft || effectiveTheme();
+      state.themeDraft = sanitizeTheme({ ...base, primary: chosen.primary, sidebar: chosen.sidebar, bg: chosen.bg, card: chosen.card, ink: chosen.ink });
+      state.themeDirty = true;
+      applyTheme(state.themeDraft);
+      syncThemeBar();
+      renderPage();
+      return;
+    }
+    if (event.target.closest('[data-action="reset-theme"]')) {
+      state.themeDraft = { ...THEME_DEFAULT };
+      state.themeDirty = true;
+      applyTheme(state.themeDraft);
+      syncThemeBar();
+      renderPage();
+      showToast("تم تطبيق المظهر الافتراضي. اضغط «حفظ المظهر» لتثبيته.");
+    }
+  });
+  document.querySelector("#theme-bar-save").addEventListener("click", async (event) => {
+    const button = event.currentTarget;
+    setLoading(button, true);
+    try {
+      await saveTheme(state.themeDraft || effectiveTheme(), currentThemeScope());
+      renderPage();
+    } catch (error) {
+      showToast(explainError(error), "error");
+    }
+    setLoading(button, false);
+  });
+  document.querySelector("#theme-bar-discard").addEventListener("click", discardThemeDraft);
+  pageContent.addEventListener("submit", async (event) => {
+    if (event.target.id !== "theme-form") return;
+    event.preventDefault();
+    const button = event.target.querySelector("button:not([type])");
+    setLoading(button, true);
+    try {
+      await saveTheme(readThemeForm(event.target), event.target.elements.scope.value);
+      renderPage();
+    } catch (error) {
+      showToast(explainError(error), "error");
+      setLoading(button, false);
+    }
+  });
+}
+
 function renderSettings() {
   const company = state.company;
   pageContent.innerHTML = `
@@ -585,6 +815,7 @@ function renderSettings() {
         <div class="span-3"><button class="button button-primary">حفظ الإعدادات</button></div>
       </form>
     </section>
+    ${renderThemeSection()}
     <section class="card card-pad settings-section"><h3>البيانات الأساسية</h3><div class="quick-actions">
       ${["cashboxes","warehouses","expenseTypes"].map((key) => `<button class="quick-action" data-action="manage-entity" data-entity="${key}"><span>＋</span><span><strong>${entityConfig[key].title}</strong><small>${number(list(key).length)} سجل</small></span></button>`).join("")}
     </div></section>
@@ -1617,13 +1848,13 @@ function printDocument(docData, docType, mode = "a4") {
       @page { size: A4; margin: 14mm; }
       * { box-sizing: border-box; }
       body { margin: 0; color: #1f2340; font-family: Cairo, Tahoma, sans-serif; font-size: 12px; line-height: 1.7; }
-      .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding-bottom: 12px; border-bottom: 3px solid #4f46e5; margin-bottom: 14px; }
-      .head h1 { margin: 0 0 4px; font-size: 22px; color: #4f46e5; } .co { font-size: 11px; color: #444; }
+      .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; padding-bottom: 12px; border-bottom: 3px solid ${printAccent()}; margin-bottom: 14px; }
+      .head h1 { margin: 0 0 4px; font-size: 22px; color: ${printAccent()}; } .co { font-size: 11px; color: #444; }
       .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
       .meta div { padding: 8px 10px; border: 1px solid #dfe1f3; border-radius: 8px; background: #f7f8ff; } .meta span { display: block; color: #7b7fa0; font-size: 10px; }
-      table { width: 100%; border-collapse: collapse; } th { background: #4f46e5; color: #fff; padding: 7px 8px; font-size: 11px; text-align: right; } td { padding: 7px 8px; border-bottom: 1px solid #e6e8f5; font-size: 11px; }
+      table { width: 100%; border-collapse: collapse; } th { background: ${printAccent()}; color: #fff; padding: 7px 8px; font-size: 11px; text-align: right; } td { padding: 7px 8px; border-bottom: 1px solid #e6e8f5; font-size: 11px; }
       tr:nth-child(even) td { background: #fafaff; }
-      .tot { width: 280px; margin: 14px 0 0 auto; } .tot div { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #eee; } .tot .g { font-size: 15px; font-weight: 800; color: #4f46e5; border-bottom: 2px solid #4f46e5; }
+      .tot { width: 280px; margin: 14px 0 0 auto; } .tot div { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #eee; } .tot .g { font-size: 15px; font-weight: 800; color: ${printAccent()}; border-bottom: 2px solid ${printAccent()}; }
       .note { margin-top: 14px; padding: 8px 10px; background: #f7f8ff; border-radius: 8px; } .sign { display: flex; justify-content: space-between; margin-top: 50px; color: #555; } .sign span { width: 30%; padding-top: 6px; border-top: 1px solid #999; text-align: center; }
       .foot { margin-top: 24px; text-align: center; color: #7b7fa0; font-size: 10px; }
     </style></head><body>
@@ -1646,9 +1877,9 @@ function printPayslip(row) {
   printHTML(`${printHead(`قسيمة راتب ${row.number}`)}<style>
     @page { size: A5 landscape; margin: 10mm; } * { box-sizing: border-box; }
     body { margin: 0; color: #1f2340; font-family: Cairo, Tahoma, sans-serif; font-size: 12px; line-height: 1.7; }
-    .head { display: flex; justify-content: space-between; border-bottom: 3px solid #4f46e5; padding-bottom: 8px; margin-bottom: 10px; } h1 { margin: 0; font-size: 18px; color: #4f46e5; }
+    .head { display: flex; justify-content: space-between; border-bottom: 3px solid ${printAccent()}; padding-bottom: 8px; margin-bottom: 10px; } h1 { margin: 0; font-size: 18px; color: ${printAccent()}; }
     .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; } .meta div { padding: 6px 8px; border: 1px solid #dfe1f3; border-radius: 8px; background: #f7f8ff; } .meta span { display: block; color: #7b7fa0; font-size: 10px; }
-    table { width: 100%; border-collapse: collapse; } td { padding: 6px 8px; border-bottom: 1px solid #e6e8f5; } .g td { font-size: 14px; font-weight: 800; color: #4f46e5; border-bottom: 2px solid #4f46e5; }
+    table { width: 100%; border-collapse: collapse; } td { padding: 6px 8px; border-bottom: 1px solid #e6e8f5; } .g td { font-size: 14px; font-weight: 800; color: ${printAccent()}; border-bottom: 2px solid ${printAccent()}; }
     .sign { display: flex; justify-content: space-between; margin-top: 28px; color: #555; } .sign span { width: 30%; padding-top: 5px; border-top: 1px solid #999; text-align: center; }
   </style></head><body>
     <div class="head"><div><h1>قسيمة راتب</h1><div>رقم: ${escapeHTML(row.number)}</div></div><div style="text-align:left"><strong>${escapeHTML(company.name || "")}</strong>${company.taxNumber ? `<br>الرقم الضريبي: ${escapeHTML(company.taxNumber)}` : ""}</div></div>
@@ -1709,7 +1940,6 @@ function viewItemPrices(itemId) {
 }
 
 // ================= أدوات التحليل والرسوم =================
-const CHART_COLORS = ["#4f46e5", "#10b981", "#f59e0b", "#f43f5e", "#0ea5e9", "#8b5cf6", "#14b8a6", "#64748b"];
 const compactNumber = (value) => new Intl.NumberFormat("ar-SA", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
 const sumOf = (rows, fn) => rows.reduce((total, row) => total + (Number(fn(row)) || 0), 0);
 const inRange = (date, from, to) => String(date || "") >= from && String(date || "") <= to;
@@ -1852,7 +2082,7 @@ function monthlySeries(keys, from = "0000-00-00", to = "9999-99-99") {
 }
 function monthlyChart(count) {
   const s = monthlySeries(monthKeys(count));
-  return barChart({ labels: s.labels, series: [{ name: "المبيعات (صافي)", values: s.sales, color: "#4f46e5" }, { name: "المشتريات (صافي)", values: s.purchases, color: "#f59e0b" }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }] });
+  return barChart({ labels: s.labels, series: [{ name: "المبيعات (صافي)", values: s.sales, color: CHART_COLORS[0] }, { name: "المشتريات (صافي)", values: s.purchases, color: "#f59e0b" }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }] });
 }
 function trendChart(report) {
   const days = (new Date(report.to) - new Date(report.from)) / 86400000;
@@ -1864,7 +2094,7 @@ function trendChart(report) {
   });
   const keys = [...map.keys()].sort();
   const names = { sales: "المبيعات", purchases: "المشتريات", expenses: "المصروفات", returns: "المرتجعات" };
-  const colors = { sales: "#4f46e5", purchases: "#f59e0b", expenses: "#f43f5e", returns: "#0ea5e9" };
+  const colors = { sales: CHART_COLORS[0], purchases: "#f59e0b", expenses: "#f43f5e", returns: "#0ea5e9" };
   return chartCard(`اتجاه ${names[report.type] || ""} ${byDay ? "يوميًا" : "شهريًا"}`, barChart({ labels: keys.map((k) => (byDay ? k.slice(5) : k.slice(2))), series: [{ name: names[report.type] || "", values: keys.map((k) => map.get(k)), color: colors[report.type] }] }));
 }
 
@@ -1895,7 +2125,7 @@ const reportBuilders = {
     const d = periodData(report.from, report.to);
     const s = monthlySeries(monthKeysBetween(report.from, report.to), report.from, report.to);
     return `<div id="report-output">${chipsHTML([["صافي المبيعات (قبل الضريبة)", money(d.salesNet)], ["مجمل الربح", money(d.grossProfit)], ["هامش الربح", `${number(Math.round(d.margin * 10) / 10)}%`], ["صافي الربح التقديري", money(d.netProfit)]])}
-      ${chartCard("الأداء الشهري", barChart({ labels: s.labels, series: [{ name: "المبيعات", values: s.sales, color: "#4f46e5" }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }, { name: "صافي الربح", values: s.profit, color: "#10b981" }] }))}
+      ${chartCard("الأداء الشهري", barChart({ labels: s.labels, series: [{ name: "المبيعات", values: s.sales, color: CHART_COLORS[0] }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }, { name: "صافي الربح", values: s.profit, color: "#10b981" }] }))}
       ${reportTable(["البند", "المبلغ"], [["صافي المبيعات بعد المرتجعات (قبل الضريبة)", money(d.salesNet)], ["تكلفة البضاعة المباعة", money(d.cogs)], ["مجمل الربح", money(d.grossProfit)], ["المصروفات (قبل الضريبة)", money(d.expensesNet)], ["الرواتب المصروفة", money(d.payrollNet)], ["صافي الربح التقديري", money(d.netProfit)]])}
       <p class="muted">التقدير يعتمد على تكلفة الصنف وقت البيع، ولا يشمل الإهلاك أو أي التزامات لم تُسجّل في البرنامج.</p></div>`;
   },
@@ -1947,7 +2177,7 @@ const reportBuilders = {
       return { key, base, out, inn, due: out - inn };
     });
     return `<div id="report-output">${chipsHTML([["ضريبة المخرجات (المبيعات بعد المرتجعات)", money(d.vatOut)], ["ضريبة المدخلات (مشتريات ومصروفات)", money(d.vatIn)], ["صافي الضريبة المستحقة", money(d.vatDue)]])}
-      ${chartCard("ضريبة المخرجات والمدخلات شهريًا", barChart({ labels: table.map((r) => monthLabel(r.key)), series: [{ name: "المخرجات", values: table.map((r) => r.out), color: "#4f46e5" }, { name: "المدخلات", values: table.map((r) => r.inn), color: "#f59e0b" }] }))}
+      ${chartCard("ضريبة المخرجات والمدخلات شهريًا", barChart({ labels: table.map((r) => monthLabel(r.key)), series: [{ name: "المخرجات", values: table.map((r) => r.out), color: CHART_COLORS[0] }, { name: "المدخلات", values: table.map((r) => r.inn), color: "#f59e0b" }] }))}
       ${reportTable(["الشهر", "المبيعات الخاضعة", "ضريبة المخرجات", "ضريبة المدخلات", "الصافي"], table.map((r) => [escapeHTML(r.key), money(r.base), money(r.out), money(r.inn), money(r.due)]))}
       <p class="muted">للمراجعة الداخلية فقط، وليس إقرارًا ضريبيًا رسميًا. راجع محاسبك قبل التقديم.</p></div>`;
   },
@@ -2009,7 +2239,7 @@ function renderAnalytics() {
       ${chipsHTML([["صافي المبيعات (قبل الضريبة)", money(d.salesNet)], ["مجمل الربح", money(d.grossProfit)], ["المصروفات + الرواتب", money(d.expensesNet + d.payrollNet)], ["صافي الربح التقديري", money(d.netProfit)], ["صافي المشتريات", money(d.purchasesNet)], ["صافي الضريبة المستحقة", money(d.vatDue)]])}
     </section>
     <div class="chart-grid">
-      ${chartCard("المبيعات والمشتريات والمصروفات شهريًا", barChart({ labels: s.labels, series: [{ name: "المبيعات", values: s.sales, color: "#4f46e5" }, { name: "المشتريات", values: s.purchases, color: "#f59e0b" }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }] }))}
+      ${chartCard("المبيعات والمشتريات والمصروفات شهريًا", barChart({ labels: s.labels, series: [{ name: "المبيعات", values: s.sales, color: CHART_COLORS[0] }, { name: "المشتريات", values: s.purchases, color: "#f59e0b" }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }] }))}
       ${chartCard("صافي الربح الشهري", barChart({ labels: s.labels, series: [{ name: "صافي الربح", values: s.profit, color: "#10b981" }] }))}
       ${chartCard("أعلى 10 أصناف مبيعًا", hBars(items.slice(0, 10).map((r) => ({ label: r.name, value: r.revenue }))))}
       ${chartCard("أعلى 10 عملاء", hBars(customers.slice(0, 10).map((r) => ({ label: r.name, value: r.net })), "#0ea5e9"))}
@@ -2181,7 +2411,14 @@ function startLiveSync() {
     state.unsubscribers.push(unsubscribe);
   }
   const settingsUnsubscribe = onSnapshot(doc(db, "settings", "company"), (snapshot) => {
-    if (snapshot.exists()) state.company = { ...state.company, ...snapshot.data() };
+    if (snapshot.exists()) {
+      state.company = { ...state.company, ...snapshot.data() };
+      const local = readLocalTheme();
+      if (state.company.theme && local?.scope !== "device") {
+        writeLocalTheme({ scope: "shared", theme: sanitizeTheme(state.company.theme) });
+        if (!state.themeDirty) applyTheme(state.company.theme);
+      }
+    }
     scheduleRender();
   }, (error) => showToast(explainError(error), "error"));
   state.unsubscribers.push(settingsUnsubscribe);
@@ -2303,6 +2540,8 @@ document.querySelector("#mobile-menu").addEventListener("click", () => toggleMen
 document.querySelector("#menu-backdrop").addEventListener("click", () => toggleMenu(false));
 bindPageEvents();
 bindComboEvents();
+bindThemeEvents();
+applyTheme(effectiveTheme());
 {
   let wasNarrow = window.innerWidth < 700;
   window.addEventListener("resize", () => {
@@ -2322,6 +2561,10 @@ if (!isConfigured) {
   onAuthStateChanged(auth, async (user) => {
     if (!user) {
       state.user = null;
+      state.themeDirty = false;
+      state.themeDraft = null;
+      applyTheme(effectiveTheme());
+      syncThemeBar();
       Object.keys(state.collections).forEach((key) => { state.collections[key] = []; });
       state.report = null;
       modalRoot.innerHTML = "";
