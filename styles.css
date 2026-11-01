@@ -486,6 +486,14 @@ html, body { max-width: 100%; overflow-x: hidden; -webkit-text-size-adjust: 100%
 .theme-bar { position: fixed; z-index: 40; bottom: max(16px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 24px); padding: 10px 14px; border: 1px solid var(--primary-border); border-radius: calc(14px * var(--r)); color: var(--ink); background: var(--card); box-shadow: 0 14px 40px color-mix(in srgb, var(--sidebar) 28%, transparent); font-size: calc(12px * var(--fs)); font-weight: 700; }
 .theme-bar-actions { display: flex; gap: 8px; }
 @media (max-width: 720px) { .theme-bar { flex-direction: column; align-items: stretch; width: calc(100vw - 24px); text-align: center; gap: 8px; } .theme-bar-actions .button { flex: 1; } }
+/* ---- إصلاح الشريط الجانبي: القائمة تتمرر داخليًا ويبقى الشعار وزر الخروج ظاهرين ---- */
+.sidebar { overflow: hidden; }
+.sidebar .brand, .sidebar .nav-caption, .sidebar .sidebar-bottom { flex: 0 0 auto; }
+.sidebar .main-nav { flex: 1 1 auto; min-height: 0; align-content: start; overflow-y: auto; overscroll-behavior: contain; padding-inline: 2px; margin-bottom: 8px; scrollbar-width: thin; scrollbar-color: var(--sidebar-line-2) transparent; }
+.sidebar .main-nav::-webkit-scrollbar { width: 5px; }
+.sidebar .main-nav::-webkit-scrollbar-thumb { border-radius: 4px; background: var(--sidebar-line-2); }
+.sidebar .main-nav .nav-link { flex: 0 0 auto; }
+@media (max-height: 760px) and (min-width: 721px) { .sidebar { padding-top: 16px; } .sidebar .brand { padding-bottom: 14px; } .sidebar .nav-link { min-height: 40px; } }
 @media print {
   :root { --bg: #fff !important; --card: #fff !important; --ink: #1f2340 !important; }
   body { background: #fff !important; }
