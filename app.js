@@ -1097,3 +1097,25 @@ if (!isConfigured) {
     }
   });
 }
+// ... existing code ...
+async function checkAuthorization(user) {
+  const membership = await getDoc(doc(db, "authorizedUsers", user.uid));
+  if (!membership.exists()) {
+    loginMessage.innerHTML = `
+      <div style="background: #fff0ef; border: 1px solid #fecaca; padding: 12px; border-radius: 10px; margin-top: 10px; text-align: right;">
+        <p style="color: #c94f53; font-weight: bold; margin: 0 0 6px 0;">ليس لديك صلاحية الوصول.</p>
+        <p style="font-size: 11px; color: #555; margin: 0 0 8px 0;">تأكد من إضافة UID المستخدم إلى authorizedUsers في Firebase Console.</p>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <input type="text" readonly value="${user.uid}" id="uid-input" style="font-family: monospace; font-size: 11px; padding: 4px 8px; direction: ltr; text-align: left;" />
+          <button type="button" class="button button-outline" style="min-height: 30px; padding: 2px 10px; font-size: 11px;" onclick="document.getElementById('uid-input').select(); document.execCommand('copy'); alert('تم نسخ الـ UID!');">نسخ</button>
+        </div>
+      </div>
+    `;
+    await signOut(auth);
+    return false;
+  }
+  return true;
+}
+
+loginForm.addEventListener("submit", async (event) => {
+// ... existing code ...
