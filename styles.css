@@ -94,13 +94,13 @@ input[type="checkbox"] { width: 18px; min-height: 18px; accent-color: var(--teal
 .brand strong { display: block; font-size: 18px; }
 .brand small { display: block; margin-top: 1px; color: #92a4bc; font-size: 10px; }
 .nav-caption { padding: 0 12px 11px; color: #8193aa; font-size: 10px; font-weight: 800; }
-.main-nav { display: grid; gap: 5px; }
+.main-nav { display: grid; gap: 4px; overflow-y: auto; max-height: calc(100vh - 240px); padding-left: 4px; }
 .nav-link {
-  min-height: 44px;
+  min-height: 40px;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 6px 10px;
   border: 0;
   border-radius: 10px;
   color: #b7c5d6;
@@ -111,11 +111,11 @@ input[type="checkbox"] { width: 18px; min-height: 18px; accent-color: var(--teal
 }
 .nav-link:hover { color: #fff; background: rgba(255,255,255,.075); }
 .nav-link.active { color: #fff; background: linear-gradient(100deg, rgba(79,70,229,.26), rgba(79,70,229,.1)); box-shadow: inset -3px 0 #818cf8; }
-.nav-icon { width: 21px; color: #a5b4fc; font-size: 17px; text-align: center; }
-.sidebar-bottom { margin-top: auto; padding: 15px 5px 0; border-top: 1px solid #3b3880; }
-.cloud-status { display: flex; align-items: center; gap: 8px; padding: 5px 7px 12px; color: #b6c4d5; font-size: 10px; }
+.nav-icon { width: 21px; color: #a5b4fc; font-size: 16px; text-align: center; }
+.sidebar-bottom { margin-top: auto; padding: 12px 5px 0; border-top: 1px solid #3b3880; }
+.cloud-status { display: flex; align-items: center; gap: 8px; padding: 4px 7px 10px; color: #b6c4d5; font-size: 10px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #42c89a; box-shadow: 0 0 0 3px rgba(66,200,154,.16); }
-.user-email { overflow: hidden; padding: 0 7px 9px; color: #9eb0c5; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.user-email { overflow: hidden; padding: 0 7px 8px; color: #9eb0c5; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .main-area { min-width: 0; }
 .topbar {
   min-height: 88px;
@@ -277,12 +277,34 @@ input:focus, select:focus, textarea:focus { border-color: #818cf8; box-shadow: 0
 .login-card .button-primary { min-height: 45px; margin-top: 2px; }
 .login-card input { min-height: 46px; }
 .form-message { overflow-wrap: anywhere; }
+
 @media print {
-  .sidebar, .topbar, .page-heading, .report-controls { display: none !important; }
+  .sidebar, .topbar, .page-heading, .report-controls, .modal-footer, .row-actions, .button { display: none !important; }
   .app-shell { display: block; }
   .page-content { max-width: none; padding: 0; }
-  .card { border: 0; box-shadow: none; }
+  .card { border: 0; box-shadow: none; background: transparent; }
+  body { background: #fff; }
+  .print-invoice-box { display: block !important; width: 100%; padding: 10px; font-family: inherit; }
 }
+
+/* تنسيق فاتورة الكاشير / الحرارية عند الطباعة */
+.print-invoice-box { display: none; }
+.pos-print-ticket {
+  width: 100%;
+  max-width: 380px;
+  margin: 0 auto;
+  padding: 15px;
+  background: #fff;
+  font-size: 12px;
+  direction: rtl;
+  text-align: right;
+  border: 1px dashed #ccc;
+  border-radius: 8px;
+}
+.pos-header { text-align: center; margin-bottom: 12px; border-bottom: 1px dashed #ddd; padding-bottom: 8px; }
+.pos-header h3 { margin: 0 0 4px; font-size: 16px; }
+.pos-table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+.pos-table th, .pos-table td { padding: 4px 6px; border-bottom: 1px dashed #eee; text-align: right; }
 
 /* ---- البحث داخل القوائم المنسدلة ---- */
 .combo { position: relative; min-width: 190px; }
