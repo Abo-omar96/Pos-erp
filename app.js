@@ -12,10 +12,14 @@ import {
   getDoc,
   getDocs,
   getFirestore,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
   runTransaction,
+  serverTimestamp,
   setDoc,
-  deleteDoc,
+  writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const isConfigured = firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("YOUR_");
@@ -32,6 +36,9 @@ const auth = app ? getAuth(app) : null;
 const db = app ? getFirestore(app) : null;
 const state = {
   user: null,
+  role: "",
+  authorizedUsers: [],
+  auditLogs: [],
   page: "dashboard",
   collections: {
     items: [],
@@ -49,7 +56,7 @@ const state = {
     employees: [],
     payroll: [],
   },
-  company: { name: "منشأتك", vatRate: 15, currency: "ر.س" },
+  company: { name: "منشأتك", taxCountry: "EG", vatRegistered: false, vatRate: 14, currency: "ج.م" },
   filter: "",
   report: null,
   statement: null,
@@ -78,6 +85,25 @@ const titles = {
   employees: "الموظفون",
   payroll: "الرواتب",
   settings: "الإعدادات",
+  audit: "سجل التدقيق",
+};
+
+const roleLabels = { admin: "مدير", accountant: "محاسب", cashier: "أمين صندوق", seller: "بائع" };
+const rolePages = {
+  admin: Object.keys(titles),
+  accountant: Object.keys(titles),
+  cashier: ["dashboard", "sales", "returns", "payments", "expenses"],
+  seller: ["dashboard", "sales", "returns", "items", "customers"],
+};
+const businessRoles = ["admin", "accountant"];
+const canAccessPage = (page) => (rolePages[state.role] || []).includes(page);
+const canManageData = () => businessRoles.includes(state.role);
+const canRecordSales = () => ["admin", "accountant", "cashier", "seller"].includes(state.role);
+const collectionsForRole = () => {
+  if (canManageData()) return Object.keys(state.collections);
+  if (state.role === "cashier") return ["items", "customers", "suppliers", "warehouses", "cashboxes", "expenseTypes", "sales", "payments", "expenses", "stockMoves", "returns"];
+  if (state.role === "seller") return ["items", "customers", "warehouses", "cashboxes", "sales", "returns"];
+  return [];
 };
 
 const entityConfig = {
@@ -95,7 +121,7 @@ const entityConfig = {
       { key: "costPrice", label: "التكلفة", type: "number", min: 0 },
       { key: "quantity", label: "الرصيد الافتتاحي", type: "number", min: 0 },
       { key: "lowStock", label: "حد التنبيه", type: "number", min: 0 },
-      { key: "vatRate", label: "الضريبة %", type: "number", default: 15, min: 0, max: 100 },
+      { key: "vatRate", label: "نسبة ضريبة المورد %", type: "number", default: 14, min: 0, max: 100 },
       { key: "trackInventory", label: "صنف مخزني", type: "checkbox", default: true },
       { key: "barcode", label: "الباركود" },
     ],
@@ -200,8 +226,8 @@ const entityConfig = {
   },
 };
 
-const money = (value) => `${new Intl.NumberFormat("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0)} ${escapeHTML(state.company.currency || "ر.س")}`;
-const number = (value) => new Intl.NumberFormat("ar-SA", { maximumFractionDigits: 2 }).format(Number(value) || 0);
+const money = (value) => `${new Intl.NumberFormat("ar-EG", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0)} ${escapeHTML(state.company.currency || "ج.م")}`;
+const number = (value) => new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 2 }).format(Number(value) || 0);
 const localDateValue = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 const isoToday = () => localDateValue(new Date());
 const makeCode = (prefix) => `${prefix}-${Date.now().toString().slice(-7)}`;
@@ -211,6 +237,71 @@ const escapeHTML = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => 
 }[char]));
 const selected = (value, current) => value === current ? " selected" : "";
 const list = (name) => state.collections[name] || [];
+const companyVatRegistered = () => state.company.vatRegistered === true;
+const itemVatRate = (item) => Number(item?.vatRate ?? state.company.vatRate ?? 14);
+const normalizeCompanySettings = (data = {}) => {
+  const legacyDefaultRate = !data.taxCountry && Number(data.vatRate) === 15 ? 14 : data.vatRate;
+  return {
+    ...state.company,
+    ...data,
+    taxCountry: "EG",
+    currency: "ج.م",
+    vatRegistered: data.vatRegistered === true,
+    vatRate: Number(legacyDefaultRate ?? 14),
+  };
+};
+const invoiceVatRate = (item, isSale) => isSale && !companyVatRegistered() ? 0 : itemVatRate(item);
+const recoverableInputVat = (row) => row.inputVatRecoverable === true ? Number(row.vatAmount || 0) : 0;
+const expenseCost = (row) => Number(row.amount || 0) + Number(row.vatAmount || 0) - recoverableInputVat(row);
+const purchaseInventoryCost = (line, inputVatRecoverable) => Number(line.net || 0) + Number(line.vatAmount || 0) - (inputVatRecoverable ? Number(line.vatAmount || 0) : 0);
+const auditActionLabels = {
+  create: "إنشاء",
+  update: "تعديل",
+  delete: "حذف",
+  post: "ترحيل عملية",
+  cancel: "إلغاء عملية",
+  settings: "تعديل الإعدادات",
+  access: "تعديل الصلاحيات",
+  backup: "استعادة نسخة",
+};
+const auditCollectionLabels = {
+  items: "الأصناف",
+  customers: "العملاء",
+  suppliers: "الموردون",
+  warehouses: "المخازن",
+  cashboxes: "الخزن والبنوك",
+  expenseTypes: "أنواع المصروفات",
+  sales: "فواتير المبيعات",
+  purchases: "فواتير المشتريات",
+  payments: "السندات",
+  expenses: "المصروفات",
+  stockMoves: "حركات المخزون",
+  returns: "المرتجعات",
+  employees: "الموظفون",
+  payroll: "الرواتب",
+  settings: "الإعدادات",
+  authorizedUsers: "المستخدمون",
+  backup: "النسخ الاحتياطي",
+};
+function auditPayload(action, targetCollection, targetId, targetNumber = "", description = "") {
+  return {
+    actorUid: state.user.uid,
+    actorEmail: state.user.email || "",
+    actorRole: state.role,
+    action,
+    targetCollection,
+    targetId: String(targetId || ""),
+    targetNumber: String(targetNumber || "").slice(0, 100),
+    description: String(description || "").slice(0, 500),
+    occurredAt: serverTimestamp(),
+  };
+}
+function setTransactionAudit(transaction, action, targetCollection, targetId, targetNumber = "", description = "") {
+  transaction.set(doc(collection(db, "auditLogs")), auditPayload(action, targetCollection, targetId, targetNumber, description));
+}
+function setBatchAudit(batch, action, targetCollection, targetId, targetNumber = "", description = "") {
+  batch.set(doc(collection(db, "auditLogs")), auditPayload(action, targetCollection, targetId, targetNumber, description));
+}
 
 // ---- بحث: تطبيع النص العربي (تشكيل/همزات/ة/ى/أرقام) ----
 const normalizeText = (value) => String(value ?? "").toLowerCase()
@@ -401,10 +492,13 @@ function closeModal() {
 }
 
 function setPage(page) {
-  if (!titles[page]) return;
+  if (!titles[page] || !canAccessPage(page)) page = "dashboard";
   state.page = page;
   state.filter = "";
-  document.querySelectorAll(".nav-link").forEach((button) => button.classList.toggle("active", button.dataset.page === page));
+  document.querySelectorAll(".nav-link").forEach((button) => {
+    button.classList.toggle("active", button.dataset.page === page);
+    button.classList.toggle("is-hidden", !canAccessPage(button.dataset.page));
+  });
   document.querySelector("#page-title").textContent = titles[page];
   document.querySelector(".sidebar").classList.remove("mobile-open");
   document.body.classList.remove("menu-open");
@@ -413,6 +507,7 @@ function setPage(page) {
 
 function renderPage() {
   if (!state.user) return;
+  if (!canAccessPage(state.page)) state.page = "dashboard";
   syncThemeBar();
   const renderers = {
     dashboard: renderDashboard,
@@ -431,8 +526,47 @@ function renderPage() {
     employees: () => renderEntity("employees"),
     payroll: renderPayroll,
     settings: renderSettings,
+    audit: renderAuditLog,
   };
   (renderers[state.page] || renderDashboard)();
+}
+
+function renderAuditLog() {
+  const rows = state.auditLogs;
+  const body = rows.map((row) => {
+    const when = row.occurredAt?.toDate ? row.occurredAt.toDate().toLocaleString("ar-EG") : "—";
+    const target = `${auditCollectionLabels[row.targetCollection] || row.targetCollection || "—"}${row.targetNumber ? ` · ${row.targetNumber}` : ""}`;
+    return `<tr><td>${escapeHTML(when)}</td><td>${escapeHTML(row.actorEmail || row.actorUid || "—")}</td><td>${escapeHTML(roleLabels[row.actorRole] || row.actorRole || "—")}</td><td>${escapeHTML(auditActionLabels[row.action] || row.action || "—")}</td><td>${escapeHTML(target)}</td><td>${escapeHTML(row.description || "—")}</td></tr>`;
+  }).join("");
+  pageContent.innerHTML = `
+    ${pageHeading("سجل التدقيق", "آخر 250 عملية مسجلة. السجل للمتابعة الداخلية، وليس بديلًا عن سجل خادمي مستقل.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>`)}
+    <section class="card card-pad">${rows.length
+    ? `<div class="table-wrap"><table><thead><tr><th>وقت التسجيل</th><th>المستخدم</th><th>الدور</th><th>العملية</th><th>المستند</th><th>البيان</th></tr></thead><tbody>${body}</tbody></table></div>`
+    : `<div class="empty-state"><strong>لا توجد أحداث مسجلة بعد</strong>ستظهر هنا العمليات التي أُجريت بعد تفعيل سجل التدقيق.</div>`}
+    </section>`;
+}
+
+function renderAccessManagement() {
+  if (state.role !== "admin") return "";
+  const rows = state.authorizedUsers.map((user) => {
+    const isCurrentUser = user.id === state.user?.uid;
+    return `<tr>
+    <td dir="ltr">${escapeHTML(user.id)}</td><td>${escapeHTML(user.email || "—")}</td>
+    <td><select data-user-role="${escapeHTML(user.id)}" ${isCurrentUser ? "disabled" : ""}>${Object.entries(roleLabels).map(([role, label]) => `<option value="${role}"${selected(role, user.role)}>${label}</option>`).join("")}</select></td>
+    <td><div class="row-actions"><button class="small-button" data-action="save-user-role" data-id="${escapeHTML(user.id)}" ${isCurrentUser ? "disabled" : ""}>حفظ الدور</button><button class="small-button" data-action="revoke-user" data-id="${escapeHTML(user.id)}" ${isCurrentUser ? "disabled" : ""}>إلغاء الوصول</button></div></td>
+  </tr>`;
+  }).join("");
+  return `<section class="card card-pad settings-section"><h3>إدارة المستخدمين والصلاحيات</h3>
+    <p class="muted">أنشئ حساب المستخدم أولًا في Firebase Authentication، ثم أضف UID الخاص به. أدوار الوصول مفروضة أيضًا بقواعد Firestore.</p>
+    <form id="authorized-user-form" class="form-grid cols-3">
+      <label>UID المستخدم<input name="uid" required dir="ltr" autocomplete="off" /></label>
+      <label>البريد الإلكتروني<input name="email" type="email" /></label>
+      <label>الدور<select name="role">${Object.entries(roleLabels).filter(([role]) => role !== "admin").map(([role, label]) => `<option value="${role}">${label}</option>`).join("")}</select></label>
+      <div class="span-3"><button class="button button-primary">إضافة / تحديث الصلاحية</button></div>
+      <p class="modal-error span-3" data-error></p>
+    </form>
+    <div class="table-wrap"><table><thead><tr><th>UID</th><th>البريد الإلكتروني</th><th>الدور</th><th>الإجراءات</th></tr></thead><tbody>${rows || `<tr><td colspan="4">لا يوجد مستخدمون معتمدون.</td></tr>`}</tbody></table></div>
+  </section>`;
 }
 
 function pageHeading(title, description, action = "") {
@@ -461,9 +595,8 @@ function renderDashboard() {
       ${statCard("أرصدة الخزن والبنوك", money(cashBalance), "▣", "الرصيد المتاح")}
     </div>
     <div class="quick-actions">
-      <button class="quick-action" data-action="new-sale"><span>↗</span><span><strong>فاتورة مبيعات</strong><small>تسجيل بيع جديد</small></span></button>
-      <button class="quick-action" data-action="new-purchase"><span>↙</span><span><strong>فاتورة مشتريات</strong><small>إضافة مخزون جديد</small></span></button>
-      <button class="quick-action" data-action="new-expense"><span>−</span><span><strong>تسجيل مصروف</strong><small>متابعة المصروفات</small></span></button>
+      ${canRecordSales() ? `<button class="quick-action" data-action="new-sale"><span>↗</span><span><strong>فاتورة مبيعات</strong><small>تسجيل بيع جديد</small></span></button>` : ""}
+      ${canManageData() ? `<button class="quick-action" data-action="new-purchase"><span>↙</span><span><strong>فاتورة مشتريات</strong><small>إضافة مخزون جديد</small></span></button><button class="quick-action" data-action="new-expense"><span>−</span><span><strong>تسجيل مصروف</strong><small>متابعة المصروفات</small></span></button>` : state.role === "cashier" ? `<button class="quick-action" data-action="new-expense"><span>−</span><span><strong>تسجيل مصروف</strong><small>متابعة المصروفات</small></span></button>` : ""}
     </div>
     <div class="dashboard-grid">
       <section class="card card-pad"><div class="card-title"><h3>أحدث فواتير المبيعات</h3><button class="text-link" data-page="sales">عرض الكل</button></div>${invoiceTable(recent, "sales", true)}</section>
@@ -476,7 +609,7 @@ function renderEntity(entity) {
   const config = entityConfig[entity];
   const rows = list(config.collection).filter((row) => matchesFilter(Object.values(row).filter((value) => typeof value !== "object")));
   pageContent.innerHTML = `
-    ${pageHeading(config.title, `إدارة بيانات ${config.title.toLowerCase()} وتحديثها.`, `<button class="button button-primary" data-action="add-entity" data-entity="${entity}">＋ ${config.add}</button>`)}
+    ${pageHeading(config.title, `إدارة بيانات ${config.title.toLowerCase()} وتحديثها.`, `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>${canManageData() ? `<button class="button button-primary" data-action="add-entity" data-entity="${entity}">＋ ${config.add}</button>` : ""}`)}
     <section class="card card-pad">
       <div class="toolbar"><input class="toolbar-search" data-filter placeholder="${escapeHTML(config.search || "ابحث...")}" value="${escapeHTML(state.filter)}" /><span class="muted">${number(rows.length)} سجل</span></div>
       ${entityTable(entity, rows)}
@@ -496,7 +629,7 @@ function entityTable(entity, rows) {
   const config = entityConfig[entity];
   if (!rows.length) return `<div class="empty-state"><strong>لا توجد بيانات بعد</strong>أضف أول سجل للبدء باستخدام هذا القسم.</div>`;
   const head = config.columns.map(([, label]) => `<th>${label}</th>`).join("");
-  const body = rows.map((row) => `<tr>${config.columns.map(([key, , type]) => `<td>${renderCell(row, key, type)}</td>`).join("")}<td><div class="row-actions">${entity === "customers" || entity === "suppliers" ? `<button class="small-button" data-action="open-statement" data-entity="${entity}" data-id="${escapeHTML(row.id)}">كشف حساب</button>` : ""}${entity === "items" ? `<button class="small-button" data-action="item-prices" data-id="${escapeHTML(row.id)}">الأسعار</button>` : ""}<button class="small-button" data-action="edit-entity" data-entity="${entity}" data-id="${escapeHTML(row.id)}">تعديل</button><button class="small-button" data-action="delete-entity" data-entity="${entity}" data-id="${escapeHTML(row.id)}">حذف</button></div></td></tr>`).join("");
+  const body = rows.map((row) => `<tr>${config.columns.map(([key, , type]) => `<td>${renderCell(row, key, type)}</td>`).join("")}<td><div class="row-actions">${(entity === "customers" || entity === "suppliers") && canManageData() ? `<button class="small-button" data-action="open-statement" data-entity="${entity}" data-id="${escapeHTML(row.id)}">كشف حساب</button>` : ""}${entity === "items" && canManageData() ? `<button class="small-button" data-action="item-prices" data-id="${escapeHTML(row.id)}">الأسعار</button>` : ""}${canManageData() ? `<button class="small-button" data-action="edit-entity" data-entity="${entity}" data-id="${escapeHTML(row.id)}">تعديل</button><button class="small-button" data-action="delete-entity" data-entity="${entity}" data-id="${escapeHTML(row.id)}">حذف</button>` : ""}</div></td></tr>`).join("");
   return `<div class="table-wrap"><table><thead><tr>${head}<th>الإجراءات</th></tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
@@ -504,7 +637,7 @@ function renderInvoices(type) {
   const title = type === "sales" ? "فواتير المبيعات" : "فواتير المشتريات";
   const rows = list(type).filter((row) => matchesFilter([row.number, row.partnerName, row.date, row.note, row.total])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   pageContent.innerHTML = `
-    ${pageHeading(title, "عرض ومتابعة الفواتير المسجلة.", `<button class="button button-primary" data-action="new-${type === "sales" ? "sale" : "purchase"}">＋ فاتورة جديدة</button>`)}
+    ${pageHeading(title, "عرض ومتابعة الفواتير المسجلة.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>${type === "sales" && canRecordSales() || type === "purchases" && canManageData() ? `<button class="button button-primary" data-action="new-${type === "sales" ? "sale" : "purchase"}">＋ فاتورة جديدة</button>` : ""}`)}
     <section class="card card-pad"><div class="toolbar"><input class="toolbar-search" data-filter placeholder="ابحث برقم الفاتورة أو اسم الجهة" value="${escapeHTML(state.filter)}" /><span class="muted">${number(rows.length)} فاتورة</span></div>${invoiceTable(rows, type)}</section>`;
 }
 
@@ -516,7 +649,7 @@ function invoiceTable(rows, type, compact = false) {
 function renderPayments() {
   const rows = [...list("payments")].filter((row) => matchesFilter([row.number, row.type, row.date, row.partyName, row.cashboxName, row.note, row.amount])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   pageContent.innerHTML = `
-    ${pageHeading("سندات القبض والصرف", "سجّل المقبوضات والمدفوعات وتابع حركة الخزينة.", `<button class="button button-primary" data-action="new-payment">＋ سند جديد</button>`)}
+    ${pageHeading("سندات القبض والصرف", "سجّل المقبوضات والمدفوعات وتابع حركة الخزينة.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button><button class="button button-primary" data-action="new-payment">＋ سند جديد</button>`)}
     <section class="card card-pad">${searchBar("ابحث برقم السند أو الجهة أو البيان", rows.length, "سند")}<div class="table-wrap">${rows.length ? `<table><thead><tr><th>رقم السند</th><th>النوع</th><th>التاريخ</th><th>الجهة</th><th>الخزينة</th><th>المبلغ</th><th>البيان</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td><span class="badge${row.type === "صرف" ? " warning" : ""}">${escapeHTML(row.type)}</span></td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.partyName || "—")}</td><td>${escapeHTML(row.cashboxName || "—")}</td><td>${money(row.amount)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty-state"><strong>لا توجد سندات</strong>أضف سند قبض أو صرف لتسجيل الحركة.</div>`}</div></section>`;
 }
 
@@ -524,7 +657,7 @@ function renderExpenses() {
   const rows = [...list("expenses")].filter((row) => matchesFilter([row.number, row.date, row.typeName, row.description, row.cashboxName, row.total])).sort((a, b) => String(b.date).localeCompare(String(a.date)));
   const total = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
   pageContent.innerHTML = `
-    ${pageHeading("المصروفات", "سجّل مصروفات المنشأة وراجع تفاصيلها.", `<button class="button button-primary" data-action="new-expense">＋ تسجيل مصروف</button>`)}
+    ${pageHeading("المصروفات", "سجّل مصروفات المنشأة وراجع تفاصيلها.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button><button class="button button-primary" data-action="new-expense">＋ تسجيل مصروف</button>`)}
     <div class="stock-summary"><div class="summary-chip"><span>إجمالي المصروفات المسجلة</span><strong>${money(total)}</strong></div><div class="summary-chip"><span>عدد المصروفات</span><strong>${number(rows.length)}</strong></div></div>
     <section class="card card-pad">${searchBar("ابحث بنوع المصروف أو التفاصيل", rows.length, "مصروف")}${rows.length ? `<div class="table-wrap"><table><thead><tr><th>رقم المصروف</th><th>التاريخ</th><th>النوع</th><th>التفاصيل</th><th>الإجمالي</th><th>الخزينة</th></tr></thead><tbody>${rows.map((row) => `<tr><td class="table-primary">${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.typeName)}</td><td>${escapeHTML(row.description || "—")}</td><td>${money(row.total)}</td><td>${escapeHTML(row.cashboxName || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد مصروفات</strong>سجّل المصروفات لمتابعة تكاليف التشغيل.</div>`}</section>`;
 }
@@ -534,7 +667,7 @@ function renderInventory() {
   const stockValue = items.reduce((sum, row) => sum + Number(row.quantity || 0) * Number(row.costPrice || 0), 0);
   const moves = [...list("stockMoves")].filter((row) => matchesFilter([row.number, row.date, row.itemName, row.type, row.note])).sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 50);
   pageContent.innerHTML = `
-    ${pageHeading("حركة المخزون", "تابع أرصدة الأصناف وسجّل التسويات المخزنية.", `<button class="button button-primary" data-action="new-stock-move">＋ تسوية مخزون</button>`)}
+    ${pageHeading("حركة المخزون", "تابع أرصدة الأصناف وسجّل التسويات المخزنية.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button><button class="button button-primary" data-action="new-stock-move">＋ تسوية مخزون</button>`)}
     <div class="stock-summary"><div class="summary-chip"><span>عدد الأصناف</span><strong>${number(items.length)}</strong></div><div class="summary-chip"><span>قيمة المخزون بالتكلفة</span><strong>${money(stockValue)}</strong></div><div class="summary-chip"><span>حركات مسجلة</span><strong>${number(list("stockMoves").length)}</strong></div></div>
     <section class="card card-pad"><div class="card-title"><h3>آخر الحركات</h3></div>${searchBar("ابحث باسم الصنف أو نوع الحركة", moves.length, "حركة")}${moves.length ? `<div class="table-wrap"><table><thead><tr><th>رقم الحركة</th><th>التاريخ</th><th>الصنف</th><th>نوع الحركة</th><th>الكمية</th><th>البيان</th></tr></thead><tbody>${moves.map((row) => `<tr><td>${escapeHTML(row.number)}</td><td>${escapeHTML(row.date)}</td><td>${escapeHTML(row.itemName)}</td><td>${escapeHTML(row.type)}</td><td>${number(row.quantity)}</td><td>${escapeHTML(row.note || "—")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد حركات مخزنية</strong>ستظهر هنا التسويات التي تسجلها.</div>`}</section>`;
 }
@@ -549,7 +682,7 @@ function renderReports() {
         <label>من تاريخ<input type="date" name="from" value="${report?.from || localDateValue(new Date(new Date().getFullYear(), new Date().getMonth(), 1))}" required /></label>
         <label>إلى تاريخ<input type="date" name="to" value="${report?.to || isoToday()}" required /></label>
         <button class="button button-primary">عرض التقرير</button>
-        ${report ? `<button type="button" class="button button-outline" data-action="print-report">طباعة</button>` : ""}
+        ${report ? `<button type="button" class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button type="button" class="button button-outline" data-action="print-report">طباعة / PDF</button>` : ""}
       </form>
       ${report ? reportMarkup(report) : `<div class="empty-state"><strong>اختر فترة التقرير</strong>حدد نوع التقرير والتواريخ ثم اضغط عرض التقرير.</div>`}
     </section>`;
@@ -706,7 +839,10 @@ function renderThemeSection() {
 
 async function saveTheme(theme, scope) {
   if (scope === "shared") {
-    await setDoc(doc(db, "settings", "company"), { theme }, { merge: true });
+    const batch = writeBatch(db);
+    batch.set(doc(db, "settings", "company"), { theme }, { merge: true });
+    setBatchAudit(batch, "settings", "settings", "company", "", "تغيير مظهر المنشأة");
+    await batch.commit();
     state.company = { ...state.company, theme };
     writeLocalTheme({ scope: "shared", theme });
   } else {
@@ -806,8 +942,9 @@ function renderSettings() {
       <form id="settings-form" class="form-grid cols-3">
         <label>اسم المنشأة<input name="name" value="${escapeHTML(company.name || "")}" required /></label>
         <label>الرقم الضريبي<input name="taxNumber" value="${escapeHTML(company.taxNumber || "")}" /></label>
-        <label>العملة<input name="currency" value="${escapeHTML(company.currency || "ر.س")}" required /></label>
-        <label>نسبة الضريبة %<input type="number" name="vatRate" min="0" max="100" step="0.01" value="${Number(company.vatRate ?? 15)}" required /></label>
+        <label>العملة<input name="currency" value="${escapeHTML(company.currency || "ج.م")}" required /></label>
+        <label>حالة التسجيل في ضريبة القيمة المضافة<select name="vatRegistered"><option value="false"${selected("false", company.vatRegistered === true ? "true" : "false")}>غير مسجلة / غير ملزمة بالتحصيل</option><option value="true"${selected("true", company.vatRegistered === true ? "true" : "false")}>مسجلة</option></select></label>
+        <label>النسبة العامة %<input type="number" name="vatRate" min="0" max="100" step="0.01" value="${Number(company.vatRate ?? 14)}" ${company.vatRegistered === true ? "" : "disabled"} required /></label>
         <label>رقم الجوال<input name="phone" type="tel" value="${escapeHTML(company.phone || "")}" /></label>
         <label>العنوان<input name="address" value="${escapeHTML(company.address || "")}" /></label>
         <label>عرض ورق الكاشير<select name="receiptWidth"><option value="80mm"${selected("80mm", company.receiptWidth || "80mm")}>80 مم</option><option value="58mm"${selected("58mm", company.receiptWidth)}>58 مم</option></select></label>
@@ -816,17 +953,27 @@ function renderSettings() {
       </form>
     </section>
     ${renderThemeSection()}
+    <p class="muted">${company.vatRegistered === true
+      ? "المنشأة مسجلة وفق الإعداد الحالي. راجع النسبة والمعاملة الضريبية لكل صنف ومستند مع محاسب مصري."
+      : "الملف المصري الافتراضي: الجنيه المصري، والمنشأة غير مسجلة ضريبيًا. لا تُضاف ضريبة مخرجات إلى المبيعات؛ وضريبة المورد غير القابلة للاسترداد تُعامل كجزء من تكلفة المخزون أو المصروف. راجع موقف التسجيل ونوع كل صنف مع محاسب مصري."}</p>
     <section class="card card-pad settings-section"><h3>البيانات الأساسية</h3><div class="quick-actions">
       ${["cashboxes","warehouses","expenseTypes"].map((key) => `<button class="quick-action" data-action="manage-entity" data-entity="${key}"><span>＋</span><span><strong>${entityConfig[key].title}</strong><small>${number(list(key).length)} سجل</small></span></button>`).join("")}
     </div></section>
+    <section class="card card-pad settings-section"><h3>استيراد الأصناف والعملاء من Excel</h3><p class="muted">احفظ ورقة Excel بصيغة CSV UTF-8، ونزّل القالب المناسب لتنسيق الأعمدة. تتم إضافة السجلات الجديدة فقط؛ الأكواد الموجودة أو المكررة تُتخطى ولا تُحدّث بياناتها. الحد الأقصى 400 صف في كل ملف.</p><div class="form-grid cols-3"><label>نوع البيانات<select id="csv-import-entity"><option value="items">الأصناف</option><option value="customers">العملاء</option></select></label><div class="heading-actions"><button class="button button-outline" data-action="download-csv-template">تنزيل القالب</button><label class="button button-outline file-button">اختيار ملف CSV<input type="file" accept=".csv,text/csv" data-action="import-csv" hidden /></label></div></div></section>
     <section class="card card-pad settings-section"><h3>النسخ الاحتياطي</h3><p class="muted">نزّل نسخة JSON من بياناتك الحالية أو استعد نسخة سابقة. احتفظ بنسخة آمنة خارج الجهاز.</p><div class="heading-actions"><button class="button button-outline" data-action="export-data">تنزيل نسخة احتياطية</button><label class="button button-outline file-button">استعادة نسخة<input type="file" accept="application/json,.json" data-action="import-data" hidden /></label></div></section>`;
+  pageContent.innerHTML += renderAccessManagement();
+  const form = pageContent.querySelector("#settings-form");
+  form.elements.vatRegistered.addEventListener("change", () => {
+    const registered = form.elements.vatRegistered.value === "true";
+    form.elements.vatRate.disabled = !registered;
+  });
 }
 
 function openEntityForm(entity, existing = null) {
   const config = entityConfig[entity];
   const fields = config.fields.map((field) => {
     if (entity === "items" && existing && field.key === "quantity") return "";
-    const value = existing?.[field.key] ?? field.default ?? "";
+    const value = existing?.[field.key] ?? (entity === "items" && field.key === "vatRate" ? Number(state.company.vatRate ?? 14) : field.default ?? "");
     if (field.type === "checkbox") return `<label class="check-field"><input name="${field.key}" type="checkbox" ${value ? "checked" : ""} />${field.label}</label>`;
     if (field.type === "select") return `<label>${field.label}<select name="${field.key}">${(field.options || []).map((option) => `<option${selected(option, value)}>${escapeHTML(option)}</option>`).join("")}</select></label>`;
     const type = field.type || "text";
@@ -843,7 +990,7 @@ function openEntityForm(entity, existing = null) {
       for (const field of config.fields) if (field.type === "number" && data[field.key] !== undefined) data[field.key] = Number(data[field.key] || 0);
       for (const field of config.fields) if (field.type === "checkbox") data[field.key] = form.elements[field.key].checked;
       if (entity === "items") {
-        data.vatRate = Number(data.vatRate ?? state.company.vatRate ?? 15);
+        data.vatRate = Number(data.vatRate ?? state.company.vatRate ?? 14);
         data.active = true;
       } else if (entity === "customers" || entity === "suppliers") {
         data.balance = Number(existing?.balance ?? data.openingBalance ?? 0);
@@ -858,11 +1005,18 @@ function openEntityForm(entity, existing = null) {
       if (!existing) {
         const duplicate = list(config.collection).some((row) => String(row.code || "").toLowerCase() === String(data.code || "").toLowerCase() && data.code);
         if (duplicate) throw new Error("هذا الكود مستخدم بالفعل.");
-        await setDoc(doc(collectionRef), data);
+        const ref = doc(collectionRef);
+        const batch = writeBatch(db);
+        batch.set(ref, data);
+        setBatchAudit(batch, "create", config.collection, ref.id, data.code || "", `إضافة ${config.title}: ${data.name || data.code || ""}`);
+        await batch.commit();
       } else {
         const duplicate = list(config.collection).some((row) => row.id !== existing.id && String(row.code || "").toLowerCase() === String(data.code || "").toLowerCase() && data.code);
         if (duplicate) throw new Error("هذا الكود مستخدم بالفعل.");
-        await setDoc(doc(db, config.collection, existing.id), data, { merge: true });
+        const batch = writeBatch(db);
+        batch.set(doc(db, config.collection, existing.id), data, { merge: true });
+        setBatchAudit(batch, "update", config.collection, existing.id, data.code || existing.code || "", `تعديل ${config.title}: ${data.name || existing.name || ""}`);
+        await batch.commit();
       }
       closeModal();
       showToast("تم حفظ البيانات بنجاح.");
@@ -898,6 +1052,7 @@ function openInvoice(type) {
         <label>المدفوع الآن<input name="paid" type="number" min="0" step="0.01" value="0" /></label>
         <label class="span-2">ملاحظات<input name="note" /></label>
         <label>الطباعة بعد الحفظ<select name="printMode">${printOptions(getPrintPref())}</select></label>
+        ${isSale ? "" : `<label class="span-2"><input name="inputVatRecoverable" type="checkbox" ${companyVatRegistered() ? "" : "disabled"} /> ضريبة المورد قابلة للخصم (تحقق من الفاتورة وشروط الخصم مع محاسبك)</label>`}
       </div>
       <div class="invoice-lines"><div class="card-title"><h3>بنود الفاتورة</h3><button class="button button-outline" type="button" data-add-line>＋ إضافة صنف</button></div>
         <div class="table-wrap"><table><thead><tr><th>الصنف</th><th>الكمية</th><th>السعر قبل الضريبة</th><th>خصم %</th><th>الإجمالي شامل الضريبة</th><th></th></tr></thead><tbody data-lines></tbody></table></div>
@@ -928,7 +1083,7 @@ function openInvoice(type) {
     const qty = Number(row.querySelector(".line-qty").value || 0);
     const price = Number(row.querySelector(".line-price").value || 0);
     const discount = Math.min(100, Math.max(0, Number(row.querySelector(".line-discount").value || 0)));
-    const rate = Number(item?.vatRate ?? state.company.vatRate ?? 15) / 100;
+    const rate = invoiceVatRate(item, isSale) / 100;
     const net = roundMoney(qty * price * (1 - discount / 100));
     row.querySelector(".line-total").textContent = (net + roundMoney(net * rate)).toFixed(2);
     updateTotals();
@@ -940,7 +1095,7 @@ function openInvoice(type) {
       const item = lineItem(row);
       const net = roundMoney(Number(row.querySelector(".line-qty").value || 0) * Number(row.querySelector(".line-price").value || 0) * (1 - Number(row.querySelector(".line-discount").value || 0) / 100));
       subtotal += net;
-      tax += roundMoney(net * Number(item?.vatRate ?? state.company.vatRate ?? 15) / 100);
+      tax += roundMoney(net * invoiceVatRate(item, isSale) / 100);
     });
     const total = subtotal + tax;
     const paid = Number(form.elements.paid.value || 0);
@@ -997,7 +1152,7 @@ function openInvoice(type) {
         const discountRate = Number(row.querySelector(".line-discount").value || 0);
         if (!(qty > 0) || price < 0 || discountRate < 0 || discountRate > 100) throw new Error("تحقق من الكمية والسعر ونسبة الخصم.");
         const net = roundMoney(qty * price * (1 - discountRate / 100));
-        const vatRate = Number(item.vatRate ?? state.company.vatRate ?? 15);
+        const vatRate = invoiceVatRate(item, isSale);
         const vatLine = roundMoney(net * vatRate / 100);
         return { itemId: item.id, itemName: item.name, code: item.code || "", quantity: qty, price, discountRate, net, vatRate, vatAmount: vatLine, total: roundMoney(net + vatLine), costPrice: Number(item.costPrice || 0) };
       });
@@ -1017,6 +1172,7 @@ function openInvoice(type) {
         cashboxName: cashbox?.name || "",
         warehouseId: form.elements.warehouseId.value,
         lines: itemLines,
+        inputVatRecoverable: !isSale && companyVatRegistered() && form.elements.inputVatRecoverable.checked,
         subtotal,
         vatAmount,
         total,
@@ -1072,6 +1228,7 @@ async function saveInvoice(type, data) {
     const invoice = { ...data, number: numberText, createdAt: new Date().toISOString(), createdBy: state.user.email };
     transaction.set(invoiceRef, invoice);
     savedInvoice = { ...invoice, id: invoiceRef.id };
+    setTransactionAudit(transaction, "post", collectionName, invoiceRef.id, numberText, `${isSale ? "إجمالي المبيعات" : "إجمالي المشتريات"}: ${money(data.total)}`);
     transaction.set(counterRef, { value: nextNumber }, { merge: true });
     for (const [itemId, quantity] of quantities) {
       const item = itemRecords.get(itemId);
@@ -1083,11 +1240,14 @@ async function saveInvoice(type, data) {
         createdAt: invoice.createdAt, createdBy: state.user.email,
       });
       if (isSale) {
-        transaction.update(doc(db, "items", itemId), { quantity: Number(item.quantity || 0) - quantity });
+        transaction.update(doc(db, "items", itemId), {
+          quantity: Number(item.quantity || 0) - quantity,
+          costPrice: Number(item.costPrice || 0),
+        });
       } else {
         const previousQty = Number(item.quantity || 0);
         const newQty = previousQty + quantity;
-        const weightedCost = (previousQty * Number(item.costPrice || 0) + quantity * data.lines.filter((line) => line.itemId === itemId).reduce((sum, line) => sum + line.net, 0)) / (newQty || 1);
+        const weightedCost = (previousQty * Number(item.costPrice || 0) + data.lines.filter((line) => line.itemId === itemId).reduce((sum, line) => sum + purchaseInventoryCost(line, data.inputVatRecoverable), 0)) / (newQty || 1);
         transaction.update(doc(db, "items", itemId), { quantity: newQty, costPrice: weightedCost });
       }
     }
@@ -1158,6 +1318,7 @@ function openPaymentForm() {
           partyType, note: form.elements.note.value.trim(),
           createdAt: new Date().toISOString(), createdBy: state.user.email,
         });
+        setTransactionAudit(transaction, "post", "payments", paymentRef.id, `VCH-${String(next).padStart(5, "0")}`, `${type} بمبلغ ${money(amount)}`);
         const sign = type === "قبض" ? 1 : -1;
         transaction.update(cashboxRef, { balance: Number(cashSnap.data().balance ?? cashSnap.data().openingBalance ?? 0) + sign * amount });
         if (partyRef && partySnap.exists()) {
@@ -1180,7 +1341,8 @@ function openExpenseForm() {
     <label>نوع المصروف<select name="typeId"><option value="">مصروف عام</option>${list("expenseTypes").map((row) => `<option value="${escapeHTML(row.id)}">${escapeHTML(row.name)}</option>`).join("")}</select></label>
     <label class="span-2">التفاصيل<input name="description" required /></label>
     <label>المبلغ قبل الضريبة<input name="amount" type="number" min="0.01" step="0.01" required /></label>
-    <label>نسبة الضريبة %<input name="vatRate" type="number" min="0" max="100" step="0.01" value="${Number(state.company.vatRate || 15)}" /></label>
+    <label>نسبة ضريبة المورد %<input name="vatRate" type="number" min="0" max="100" step="0.01" value="${Number(state.company.vatRate ?? 14)}" /></label>
+    <label class="span-2"><input name="inputVatRecoverable" type="checkbox" ${companyVatRegistered() ? "" : "disabled"} /> ضريبة المورد قابلة للخصم (تحقق من الفاتورة وشروط الخصم مع محاسبك)</label>
     <label>الخزينة / البنك<select name="cashboxId" required>${optionsFor("cashboxes", "", "اختر الخزينة")}</select></label>
     <label>رقم فاتورة المورد<input name="supplierInvoice" /></label>
     <p class="modal-error span-2" data-error></p>
@@ -1211,10 +1373,13 @@ function openExpenseForm() {
         transaction.set(expenseRef, {
           number: `EXP-${String(next).padStart(5, "0")}`, date: form.elements.date.value,
           typeName: type?.name || "مصروف عام", description: form.elements.description.value.trim(),
-          amount, vatAmount, total, cashboxId: cashbox.id, cashboxName: cashbox.name,
+          amount, vatAmount, total,
+          inputVatRecoverable: companyVatRegistered() && form.elements.inputVatRecoverable.checked,
+          cashboxId: cashbox.id, cashboxName: cashbox.name,
           supplierInvoice: form.elements.supplierInvoice.value.trim(),
           createdAt: new Date().toISOString(), createdBy: state.user.email,
         });
+        setTransactionAudit(transaction, "post", "expenses", expenseRef.id, `EXP-${String(next).padStart(5, "0")}`, `مصروف ${type?.name || "عام"} بمبلغ ${money(total)}`);
         transaction.update(cashRef, { balance: Number(cashSnap.data().balance ?? cashSnap.data().openingBalance ?? 0) - total });
       });
       closeModal();
@@ -1273,6 +1438,7 @@ function openStockMoveForm() {
           itemName: item.name, type, quantity, costPrice, note: form.elements.note.value.trim(),
           createdAt: new Date().toISOString(), createdBy: state.user.email,
         });
+        setTransactionAudit(transaction, "post", "stockMoves", moveRef.id, "تسوية مخزون", `${type} للصنف ${item.name} بكمية ${number(quantity)}`);
       });
       closeModal();
       showToast("تم تسجيل الحركة وتحديث رصيد الصنف.");
@@ -1318,7 +1484,10 @@ async function deleteEntity(entity, id) {
     }
     const snapshot = await getDoc(doc(db, config.collection, id));
     if (entity === "items" && Number(snapshot.data()?.quantity || 0) !== 0) throw new Error("لا يمكن حذف صنف له رصيد مخزني؛ استخدم تسوية المخزون أولًا.");
-    await deleteDoc(doc(db, config.collection, id));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, config.collection, id));
+    setBatchAudit(batch, "delete", config.collection, id, row.code || "", `حذف ${config.title}: ${row.name || row.code || ""}`);
+    await batch.commit();
     showToast("تم حذف السجل.");
   } catch (error) {
     showToast(explainError(error), "error");
@@ -1349,6 +1518,9 @@ function bindPageEvents() {
     if (action === "new-stock-move") openStockMoveForm();
     if (action === "manage-entity") openEntityManager(button.dataset.entity);
     if (action === "export-data") exportData();
+    if (action === "export-table") exportVisibleTables();
+    if (action === "export-analytics") exportAnalyticsData();
+    if (action === "download-csv-template") downloadImportTemplate();
     if (action === "new-sale-return") openReturnForm("sales");
     if (action === "new-purchase-return") openReturnForm("purchases");
     if (action === "view-return") viewReturn(button.dataset.id);
@@ -1371,6 +1543,8 @@ function bindPageEvents() {
       state.statement = { type: button.dataset.entity, partyId: button.dataset.id, from: `${new Date().getFullYear()}-01-01`, to: isoToday() };
       setPage("statements");
     }
+    if (action === "save-user-role") saveAuthorizedUserRole(button.dataset.id);
+    if (action === "revoke-user") revokeAuthorizedUser(button.dataset.id);
     if (action === "print-report") window.print();
   });
   pageContent.addEventListener("input", (event) => {
@@ -1384,6 +1558,28 @@ function bindPageEvents() {
     }
   });
   pageContent.addEventListener("submit", async (event) => {
+    if (event.target.id === "authorized-user-form") {
+      event.preventDefault();
+      const form = event.target;
+      const button = form.querySelector("button");
+      setLoading(button, true);
+      try {
+        const uid = form.elements.uid.value.trim();
+        if (!uid || uid.includes("/")) throw new Error("أدخل UID صالحًا من Firebase Authentication.");
+        const batch = writeBatch(db);
+        batch.set(doc(db, "authorizedUsers", uid), {
+          email: form.elements.email.value.trim(),
+          role: form.elements.role.value,
+        });
+        setBatchAudit(batch, "access", "authorizedUsers", uid, "", `منح دور ${roleLabels[form.elements.role.value]} للمستخدم`);
+        await batch.commit();
+        showToast("تم حفظ صلاحية المستخدم.");
+      } catch (error) {
+        form.querySelector("[data-error]").textContent = explainError(error);
+      } finally {
+        setLoading(button, false);
+      }
+    }
     if (event.target.id === "settings-form") {
       event.preventDefault();
       const form = event.target;
@@ -1391,9 +1587,18 @@ function bindPageEvents() {
       setLoading(button, true);
       try {
         const data = Object.fromEntries(new FormData(form));
-        data.vatRate = Number(data.vatRate);
-        await setDoc(doc(db, "settings", "company"), data, { merge: true });
-        state.company = { ...state.company, ...data };
+        data.taxCountry = "EG";
+        data.currency = "ج.م";
+        data.vatRegistered = data.vatRegistered === "true";
+        data.vatRate = data.vatRegistered
+          ? Number(data.vatRate ?? state.company.vatRate ?? 14)
+          : Number(state.company.vatRate ?? 14);
+        if (data.vatRate < 0 || data.vatRate > 100) throw new Error("تحقق من نسبة الضريبة.");
+        const batch = writeBatch(db);
+        batch.set(doc(db, "settings", "company"), data, { merge: true });
+        setBatchAudit(batch, "settings", "settings", "company", "", "تحديث بيانات المنشأة والإعدادات الضريبية");
+        await batch.commit();
+        state.company = normalizeCompanySettings({ ...state.company, ...data });
         renderPage();
         showToast("تم حفظ إعدادات المنشأة.");
       } catch (error) {
@@ -1415,7 +1620,54 @@ function bindPageEvents() {
   });
   pageContent.addEventListener("change", (event) => {
     if (event.target.matches('[data-action="import-data"]')) { const input = event.target; importData(input.files?.[0]).finally(() => { input.value = ""; }); }
+    if (event.target.matches('[data-action="import-csv"]')) {
+      const input = event.target;
+      const entity = pageContent.querySelector("#csv-import-entity")?.value;
+      importMasterDataCSV(input.files?.[0], entity).finally(() => { input.value = ""; });
+    }
   });
+}
+
+async function saveAuthorizedUserRole(uid) {
+  if (state.role !== "admin" || !uid || uid === state.user?.uid) return;
+  const role = pageContent.querySelector(`[data-user-role="${CSS.escape(uid)}"]`)?.value;
+  if (!Object.hasOwn(roleLabels, role)) {
+    showToast("اختر دورًا صالحًا.", "error");
+    return;
+  }
+  const currentUser = state.authorizedUsers.find((user) => user.id === uid);
+  if (currentUser?.role === "admin" && role !== "admin" && state.authorizedUsers.filter((user) => user.role === "admin").length <= 1) {
+    showToast("لا يمكن إزالة دور المدير الأخير.", "error");
+    return;
+  }
+  try {
+    const batch = writeBatch(db);
+    batch.set(doc(db, "authorizedUsers", uid), { role }, { merge: true });
+    setBatchAudit(batch, "access", "authorizedUsers", uid, "", `تغيير دور المستخدم إلى ${roleLabels[role]}`);
+    await batch.commit();
+    showToast("تم تحديث دور المستخدم.");
+  } catch (error) {
+    showToast(explainError(error), "error");
+  }
+}
+
+async function revokeAuthorizedUser(uid) {
+  const user = state.authorizedUsers.find((entry) => entry.id === uid);
+  if (state.role !== "admin" || !user || uid === state.user?.uid) return;
+  if (user.role === "admin" && state.authorizedUsers.filter((entry) => entry.role === "admin").length <= 1) {
+    showToast("لا يمكن إلغاء وصول المدير الأخير.", "error");
+    return;
+  }
+  if (!window.confirm(`إلغاء وصول ${user.email || uid}؟`)) return;
+  try {
+    const batch = writeBatch(db);
+    batch.delete(doc(db, "authorizedUsers", uid));
+    setBatchAudit(batch, "access", "authorizedUsers", uid, "", "إلغاء صلاحية المستخدم");
+    await batch.commit();
+    showToast("تم إلغاء وصول المستخدم.");
+  } catch (error) {
+    showToast(explainError(error), "error");
+  }
 }
 
 function returnsTable(rows) {
@@ -1428,7 +1680,7 @@ function renderReturns() {
   const rows = all.filter((row) => matchesFilter([row.number, row.partnerName, row.originalNumber, row.date, row.note, row.kind === "sales" ? "مرتجع مبيعات" : "مرتجع مشتريات"])).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const sum = (kind) => all.filter((row) => row.kind === kind).reduce((total, row) => total + Number(row.total || 0), 0);
   pageContent.innerHTML = `
-    ${pageHeading("المرتجعات", "مرتجعات المبيعات والمشتريات مع تحديث المخزون وأرصدة العملاء والموردين والخزائن.", `<button class="button button-outline" data-action="new-purchase-return">＋ مرتجع مشتريات</button><button class="button button-primary" data-action="new-sale-return">＋ مرتجع مبيعات</button>`)}
+    ${pageHeading("المرتجعات", "مرتجعات المبيعات والمشتريات مع تحديث المخزون وأرصدة العملاء والموردين والخزائن.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>${canManageData() ? `<button class="button button-outline" data-action="new-purchase-return">＋ مرتجع مشتريات</button>` : ""}${canRecordSales() ? `<button class="button button-primary" data-action="new-sale-return">＋ مرتجع مبيعات</button>` : ""}`)}
     <div class="stock-summary"><div class="summary-chip"><span>إجمالي مرتجعات المبيعات</span><strong>${money(sum("sales"))}</strong></div><div class="summary-chip"><span>إجمالي مرتجعات المشتريات</span><strong>${money(sum("purchases"))}</strong></div><div class="summary-chip"><span>عدد المرتجعات</span><strong>${number(all.length)}</strong></div></div>
     <section class="card card-pad">${searchBar("ابحث برقم المرتجع أو الجهة أو الفاتورة الأصلية", rows.length, "مرتجع")}${returnsTable(rows)}</section>`;
 }
@@ -1473,7 +1725,7 @@ function openReturnForm(kind) {
   }
   const lineItem = (row) => list("items").find((entry) => entry.id === row.querySelector(".line-item").value);
   const originLine = (item) => currentOriginal()?.lines?.find((line) => line.itemId === item?.id);
-  const lineVat = (row) => { const item = lineItem(row); return Number(originLine(item)?.vatRate ?? item?.vatRate ?? state.company.vatRate ?? 15); };
+  const lineVat = (row) => { const item = lineItem(row); return Number(originLine(item)?.vatRate ?? invoiceVatRate(item, isSale)); };
 
   function addLine(focus = false) {
     const row = document.createElement("tr");
@@ -1484,11 +1736,13 @@ function openReturnForm(kind) {
   }
   function updateLine(row, itemChanged = false) {
     const item = lineItem(row);
+    const origin = originLine(item);
     if (itemChanged && item) {
-      const origin = originLine(item);
       row.querySelector(".line-price").value = origin ? origin.price : (Number(isSale ? item.salePrice : item.costPrice) || 0);
       row.querySelector(".line-discount").value = origin ? origin.discountRate || 0 : 0;
     }
+    row.querySelector(".line-price").readOnly = !!origin;
+    row.querySelector(".line-discount").readOnly = !!origin;
     const qty = Number(row.querySelector(".line-qty").value || 0);
     const price = Number(row.querySelector(".line-price").value || 0);
     const discount = Math.min(100, Math.max(0, Number(row.querySelector(".line-discount").value || 0)));
@@ -1513,7 +1767,10 @@ function openReturnForm(kind) {
   form.querySelector("[data-add-line]").addEventListener("click", () => addLine(true));
   form.addEventListener("keydown", (event) => { if (event.key === "Enter" && event.target.matches("input")) event.preventDefault(); });
   form.addEventListener("change", (event) => {
-    if (event.target.name === "partnerId") fillOriginals();
+    if (event.target.name === "partnerId") {
+      fillOriginals();
+      lines.querySelectorAll("tr").forEach((row) => updateLine(row, !!lineItem(row)));
+    }
   });
   lines.addEventListener("change", (event) => {
     const row = event.target.closest("tr");
@@ -1556,10 +1813,13 @@ function openReturnForm(kind) {
         const price = Number(row.querySelector(".line-price").value);
         const discountRate = Number(row.querySelector(".line-discount").value || 0);
         if (!(qty > 0) || price < 0 || discountRate < 0 || discountRate > 100) throw new Error("تحقق من الكمية والسعر ونسبة الخصم.");
-        const net = roundMoney(qty * price * (1 - discountRate / 100));
-        const vatRate = lineVat(row);
+        const sourceLine = originLine(item);
+        const returnPrice = Number(sourceLine?.price ?? price);
+        const returnDiscountRate = Number(sourceLine?.discountRate ?? discountRate);
+        const net = roundMoney(qty * returnPrice * (1 - returnDiscountRate / 100));
+        const vatRate = Number(sourceLine?.vatRate ?? lineVat(row));
         const vatLine = roundMoney(net * vatRate / 100);
-        return { itemId: item.id, itemName: item.name, code: item.code || "", quantity: qty, price, discountRate, net, vatRate, vatAmount: vatLine, total: roundMoney(net + vatLine), costPrice: Number(item.costPrice || 0) };
+        return { itemId: item.id, itemName: item.name, code: item.code || "", quantity: qty, price: returnPrice, discountRate: returnDiscountRate, net, vatRate, vatAmount: vatLine, total: roundMoney(net + vatLine), costPrice: Number(sourceLine?.costPrice ?? item.costPrice ?? 0) };
       });
       if (!itemLines.length) throw new Error("أضف بندًا واحدًا على الأقل.");
       if (original) {
@@ -1587,6 +1847,7 @@ function openReturnForm(kind) {
         partnerId: partner?.id || "", partnerName: partner?.name || "نقدي",
         originalId: original?.id || "", originalNumber: original?.number || "",
         cashboxId, cashboxName: cashbox?.name || "",
+        inputVatRecoverable: kind === "purchases" && original?.inputVatRecoverable === true,
         lines: itemLines, subtotal, vatAmount, total, refunded,
         balanceEffect: Math.max(0, roundMoney(total - refunded)),
         note: form.elements.note.value.trim(),
@@ -1619,7 +1880,11 @@ async function saveReturn(kind, data) {
     for (const snap of itemSnaps) if (!snap.exists()) throw new Error("أحد الأصناف في المرتجع لم يعد موجودًا.");
     const itemRecords = new Map(itemSnaps.map((snap) => [snap.id, snap.data()]));
     const quantities = new Map();
-    data.lines.forEach((line) => quantities.set(line.itemId, (quantities.get(line.itemId) || 0) + line.quantity));
+    const returnedCostValues = new Map();
+    data.lines.forEach((line) => {
+      quantities.set(line.itemId, (quantities.get(line.itemId) || 0) + line.quantity);
+      returnedCostValues.set(line.itemId, (returnedCostValues.get(line.itemId) || 0) + Number(line.costPrice || 0) * line.quantity);
+    });
     if (!isSale) {
       for (const [itemId, quantity] of quantities) {
         const item = itemRecords.get(itemId);
@@ -1630,14 +1895,21 @@ async function saveReturn(kind, data) {
     const numberText = `${isSale ? "SRT" : "PRT"}-${String(nextNumber).padStart(5, "0")}`;
     const createdAt = new Date().toISOString();
     transaction.set(returnRef, { ...data, number: numberText, createdAt, createdBy: state.user.email });
+    setTransactionAudit(transaction, "post", "returns", returnRef.id, numberText, `${isSale ? "مرتجع مبيعات" : "مرتجع مشتريات"} بإجمالي ${money(data.total)}`);
     transaction.set(counterRef, { value: nextNumber }, { merge: true });
     for (const [itemId, quantity] of quantities) {
       const item = itemRecords.get(itemId);
       if (item.trackInventory === false) continue;
-      transaction.update(doc(db, "items", itemId), { quantity: Number(item.quantity || 0) + (isSale ? quantity : -quantity) });
+      const currentQty = Number(item.quantity || 0);
+      const nextQty = currentQty + (isSale ? quantity : -quantity);
+      const returnCost = quantity ? returnedCostValues.get(itemId) / quantity : 0;
+      const weightedCost = isSale && nextQty > 0
+        ? roundMoney((currentQty * Number(item.costPrice || 0) + returnedCostValues.get(itemId)) / nextQty)
+        : Number(item.costPrice || 0);
+      transaction.update(doc(db, "items", itemId), { quantity: nextQty, ...(isSale ? { costPrice: weightedCost } : {}) });
       transaction.set(doc(collection(db, "stockMoves")), {
         number: numberText, date: data.date, itemId, itemName: item.name,
-        type: isSale ? "مرتجع بيع" : "مرتجع شراء", quantity, costPrice: Number(item.costPrice || 0),
+        type: isSale ? "مرتجع بيع" : "مرتجع شراء", quantity, costPrice: isSale ? returnCost : Number(item.costPrice || 0),
         note: `${isSale ? "مرتجع مبيعات" : "مرتجع مشتريات"} ${numberText}`,
         createdAt, createdBy: state.user.email,
       });
@@ -1741,7 +2013,7 @@ function renderStatements() {
   const st = state.statement || { type: "customers", partyId: "", from: `${new Date().getFullYear()}-01-01`, to: isoToday() };
   const data = st.partyId ? buildStatement(st) : null;
   pageContent.innerHTML = `
-    ${pageHeading("كشف حساب عميل / مورد", "حركة الحساب بالتفصيل: الفواتير والسندات والمرتجعات مع الرصيد المتحرك.", data ? `<button class="button button-outline" data-action="print-report">طباعة</button>` : "")}
+    ${pageHeading("كشف حساب عميل / مورد", "حركة الحساب بالتفصيل: الفواتير والسندات والمرتجعات مع الرصيد المتحرك.", data ? `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>` : "")}
     <section class="card card-pad">
       <form id="statement-form" class="report-controls">
         <label>نوع الحساب<select name="type"><option value="customers"${selected("customers", st.type)}>عميل</option><option value="suppliers"${selected("suppliers", st.type)}>مورد</option></select></label>
@@ -1804,7 +2076,7 @@ function printHTML(html) {
   Promise.race([win.document.fonts?.ready || Promise.resolve(), new Promise((resolve) => window.setTimeout(resolve, 1500))]).then(() => window.setTimeout(go, 150));
 }
 
-const printFmt = (value) => new Intl.NumberFormat("ar-SA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
+const printFmt = (value) => new Intl.NumberFormat("ar-EG", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value) || 0);
 const printHead = (title) => `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8" /><title>${escapeHTML(title)}</title><link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet" />`;
 
 function printDocument(docData, docType, mode = "a4") {
@@ -1813,7 +2085,7 @@ function printDocument(docData, docType, mode = "a4") {
   const partyLabel = isSalesSide ? "العميل" : "المورد";
   const title = DOC_TITLES[docType] || "مستند";
   const company = state.company;
-  const currency = escapeHTML(company.currency || "ر.س");
+  const currency = escapeHTML(company.currency || "ج.م");
   const settle = isReturn
     ? [[isSalesSide ? "المردود نقدًا" : "المستلم نقدًا", docData.refunded], ["الأثر على الرصيد", docData.balanceEffect]]
     : [["المدفوع", docData.paid], ["المتبقي", docData.due]];
@@ -1884,7 +2156,7 @@ function printPayslip(row) {
   </style></head><body>
     <div class="head"><div><h1>قسيمة راتب</h1><div>رقم: ${escapeHTML(row.number)}</div></div><div style="text-align:left"><strong>${escapeHTML(company.name || "")}</strong>${company.taxNumber ? `<br>الرقم الضريبي: ${escapeHTML(company.taxNumber)}` : ""}</div></div>
     <div class="meta"><div><span>الموظف</span>${escapeHTML(row.employeeName)}</div><div><span>الوظيفة</span>${escapeHTML(row.jobTitle || "—")}</div><div><span>شهر الراتب</span>${escapeHTML(row.month)}</div></div>
-    <table><tbody><tr><td>الراتب الأساسي</td><td>${printFmt(row.basic)}</td></tr><tr><td>البدلات</td><td>${printFmt(row.allowances)}</td></tr><tr><td>مكافآت / إضافي</td><td>${printFmt(row.bonus)}</td></tr><tr><td>خصومات / سلف</td><td>${printFmt(row.deductions)}</td></tr><tr class="g"><td>صافي الراتب</td><td>${printFmt(row.net)} ${escapeHTML(company.currency || "ر.س")}</td></tr></tbody></table>
+    <table><tbody><tr><td>الراتب الأساسي</td><td>${printFmt(row.basic)}</td></tr><tr><td>البدلات</td><td>${printFmt(row.allowances)}</td></tr><tr><td>مكافآت / إضافي</td><td>${printFmt(row.bonus)}</td></tr><tr><td>خصومات / سلف</td><td>${printFmt(row.deductions)}</td></tr><tr class="g"><td>صافي الراتب</td><td>${printFmt(row.net)} ${escapeHTML(company.currency || "ج.م")}</td></tr></tbody></table>
     <p>تاريخ الصرف: ${escapeHTML(row.date)}${row.cashboxName ? ` — من: ${escapeHTML(row.cashboxName)}` : ""}</p>
     <div class="sign"><span>توقيع الموظف</span><span>توقيع المحاسب</span></div>
   </body></html>`);
@@ -1940,7 +2212,7 @@ function viewItemPrices(itemId) {
 }
 
 // ================= أدوات التحليل والرسوم =================
-const compactNumber = (value) => new Intl.NumberFormat("ar-SA", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
+const compactNumber = (value) => new Intl.NumberFormat("ar-EG", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value) || 0);
 const sumOf = (rows, fn) => rows.reduce((total, row) => total + (Number(fn(row)) || 0), 0);
 const inRange = (date, from, to) => String(date || "") >= from && String(date || "") <= to;
 const lineCost = (line) => Number(line.costPrice || 0) * Number(line.quantity || 0);
@@ -2050,10 +2322,10 @@ function periodData(from, to) {
   const salesNet = sumOf(sales, (r) => r.subtotal) - sumOf(salesReturns, (r) => r.subtotal);
   const cogs = linesCost(sales) - linesCost(salesReturns);
   const grossProfit = salesNet - cogs;
-  const expensesNet = sumOf(expenses, (r) => r.amount);
+  const expensesNet = sumOf(expenses, expenseCost);
   const payrollNet = sumOf(payroll, (r) => r.net);
   const vatOut = sumOf(sales, (r) => r.vatAmount) - sumOf(salesReturns, (r) => r.vatAmount);
-  const vatIn = sumOf(purchases, (r) => r.vatAmount) - sumOf(purchaseReturns, (r) => r.vatAmount) + sumOf(expenses, (r) => r.vatAmount);
+  const vatIn = sumOf(purchases, recoverableInputVat) - sumOf(purchaseReturns, recoverableInputVat) + sumOf(expenses, recoverableInputVat);
   return {
     sales, purchases, expenses, payroll, salesReturns, purchaseReturns,
     salesNet, cogs, grossProfit, expensesNet, payrollNet,
@@ -2076,7 +2348,7 @@ function monthlySeries(keys, from = "0000-00-00", to = "9999-99-99") {
   const salesNet = by(sales, (r) => r.subtotal).map((v, i) => v - by(salesReturns, (r) => r.subtotal)[i]);
   const cogs = by(sales, lineCosts).map((v, i) => v - by(salesReturns, lineCosts)[i]);
   const purchasesNet = by(purchases, (r) => r.subtotal).map((v, i) => v - by(purchaseReturns, (r) => r.subtotal)[i]);
-  const expensesNet = by(expenses, (r) => r.amount);
+  const expensesNet = by(expenses, expenseCost);
   const payrollNet = by(payroll, (r) => r.net);
   return { labels: keys.map(monthLabel), sales: salesNet, purchases: purchasesNet, expenses: expensesNet, payroll: payrollNet, profit: salesNet.map((v, i) => v - cogs[i] - expensesNet[i] - payrollNet[i]) };
 }
@@ -2127,7 +2399,7 @@ const reportBuilders = {
     return `<div id="report-output">${chipsHTML([["صافي المبيعات (قبل الضريبة)", money(d.salesNet)], ["مجمل الربح", money(d.grossProfit)], ["هامش الربح", `${number(Math.round(d.margin * 10) / 10)}%`], ["صافي الربح التقديري", money(d.netProfit)]])}
       ${chartCard("الأداء الشهري", barChart({ labels: s.labels, series: [{ name: "المبيعات", values: s.sales, color: CHART_COLORS[0] }, { name: "المصروفات", values: s.expenses, color: "#f43f5e" }, { name: "الرواتب", values: s.payroll, color: "#8b5cf6" }, { name: "صافي الربح", values: s.profit, color: "#10b981" }] }))}
       ${reportTable(["البند", "المبلغ"], [["صافي المبيعات بعد المرتجعات (قبل الضريبة)", money(d.salesNet)], ["تكلفة البضاعة المباعة", money(d.cogs)], ["مجمل الربح", money(d.grossProfit)], ["المصروفات (قبل الضريبة)", money(d.expensesNet)], ["الرواتب المصروفة", money(d.payrollNet)], ["صافي الربح التقديري", money(d.netProfit)]])}
-      <p class="muted">التقدير يعتمد على تكلفة الصنف وقت البيع، ولا يشمل الإهلاك أو أي التزامات لم تُسجّل في البرنامج.</p></div>`;
+      <p class="muted">التقدير يعتمد على تكلفة الصنف وقت البيع${companyVatRegistered() ? "" : "، ويشمل ضريبة المورد غير القابلة للاسترداد ضمن المصروفات وتكلفة المخزون"}، ولا يشمل الإهلاك أو أي التزامات لم تُسجّل في البرنامج.</p></div>`;
   },
   itemsSales(report) {
     const rows = aggregateItems(report.from, report.to);
@@ -2172,13 +2444,13 @@ const reportBuilders = {
     const month = (rows, key, fn) => sumOf(rows.filter((r) => monthOf(r.date) === key), fn);
     const table = keys.map((key) => {
       const out = month(parts.sales, key, (r) => r.vatAmount) - month(parts.sret, key, (r) => r.vatAmount);
-      const inn = month(parts.purchases, key, (r) => r.vatAmount) - month(parts.pret, key, (r) => r.vatAmount) + month(parts.expenses, key, (r) => r.vatAmount);
+      const inn = month(parts.purchases, key, recoverableInputVat) - month(parts.pret, key, recoverableInputVat) + month(parts.expenses, key, recoverableInputVat);
       const base = month(parts.sales, key, (r) => r.subtotal) - month(parts.sret, key, (r) => r.subtotal);
       return { key, base, out, inn, due: out - inn };
     });
-    return `<div id="report-output">${chipsHTML([["ضريبة المخرجات (المبيعات بعد المرتجعات)", money(d.vatOut)], ["ضريبة المدخلات (مشتريات ومصروفات)", money(d.vatIn)], ["صافي الضريبة المستحقة", money(d.vatDue)]])}
+    return `<div id="report-output">${!companyVatRegistered() ? '<p class="muted">المنشأة غير مسجلة وفق الإعداد الحالي؛ لذلك لا يمكن تحديد ضريبة مدخلات قابلة للخصم للمستندات الجديدة. تظل المعالجة المحفوظة للمستندات السابقة كما هي. ضريبة المورد غير القابلة للاسترداد تدخل في تكلفة المخزون أو المصروف.</p>' : ""}${chipsHTML([["ضريبة المخرجات (المبيعات بعد المرتجعات)", money(d.vatOut)], ["ضريبة المدخلات القابلة للخصم", money(d.vatIn)], ["صافي الضريبة المستحقة", money(d.vatDue)]])}
       ${chartCard("ضريبة المخرجات والمدخلات شهريًا", barChart({ labels: table.map((r) => monthLabel(r.key)), series: [{ name: "المخرجات", values: table.map((r) => r.out), color: CHART_COLORS[0] }, { name: "المدخلات", values: table.map((r) => r.inn), color: "#f59e0b" }] }))}
-      ${reportTable(["الشهر", "المبيعات الخاضعة", "ضريبة المخرجات", "ضريبة المدخلات", "الصافي"], table.map((r) => [escapeHTML(r.key), money(r.base), money(r.out), money(r.inn), money(r.due)]))}
+      ${reportTable(["الشهر", companyVatRegistered() ? "صافي المبيعات" : "صافي المبيعات (غير مصنفة ضريبيًا)", "ضريبة المخرجات", companyVatRegistered() ? "ضريبة المدخلات" : "ضريبة مورد غير قابلة للخصم", "الصافي"], table.map((r) => [escapeHTML(r.key), money(r.base), money(r.out), money(r.inn), money(r.due)]))}
       <p class="muted">للمراجعة الداخلية فقط، وليس إقرارًا ضريبيًا رسميًا. راجع محاسبك قبل التقديم.</p></div>`;
   },
   cashbook(report) {
@@ -2221,7 +2493,7 @@ function renderAnalytics() {
   const items = aggregateItems(a.from, a.to);
   const customers = aggregateCustomers(a.from, a.to);
   const expenseTypes = new Map();
-  d.expenses.forEach((r) => expenseTypes.set(r.typeName || "مصروف عام", (expenseTypes.get(r.typeName || "مصروف عام") || 0) + Number(r.amount || 0)));
+  d.expenses.forEach((r) => expenseTypes.set(r.typeName || "مصروف عام", (expenseTypes.get(r.typeName || "مصروف عام") || 0) + expenseCost(r)));
   if (d.payrollNet) expenseTypes.set("رواتب", d.payrollNet);
   const stockByCategory = new Map();
   list("items").forEach((r) => stockByCategory.set(r.category || "بدون مجموعة", (stockByCategory.get(r.category || "بدون مجموعة") || 0) + Number(r.quantity || 0) * Number(r.costPrice || 0)));
@@ -2229,7 +2501,7 @@ function renderAnalytics() {
   const receivables = list("customers").map((r) => ({ label: r.name, value: Number(r.balance ?? r.openingBalance ?? 0) })).filter((r) => r.value > 0).sort((x, y) => y.value - x.value).slice(0, 10);
   const payables = list("suppliers").map((r) => ({ label: r.name, value: Number(r.balance ?? r.openingBalance ?? 0) })).filter((r) => r.value > 0).sort((x, y) => y.value - x.value).slice(0, 10);
   pageContent.innerHTML = `
-    ${pageHeading("التحليلات والرسوم البيانية", "نظرة مرئية على المبيعات والأرباح والمصروفات والمخزون والأرصدة.", `<button class="button button-outline" data-action="print-report">طباعة</button>`)}
+    ${pageHeading("التحليلات والرسوم البيانية", "نظرة مرئية على المبيعات والأرباح والمصروفات والمخزون والأرصدة.", `<button class="button button-outline" data-action="export-analytics">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button>`)}
     <section class="card card-pad">
       <form id="analytics-form" class="report-controls">
         <label>من تاريخ<input type="date" name="from" value="${escapeHTML(a.from)}" required /></label>
@@ -2267,7 +2539,7 @@ function renderPayroll() {
   const rows = all.filter((r) => matchesFilter([r.number, r.month, r.employeeName, r.jobTitle, r.cashboxName, r.date])).sort((a, b) => String(b.month).localeCompare(String(a.month)) || String(b.date).localeCompare(String(a.date)));
   const month = isoToday().slice(0, 7);
   pageContent.innerHTML = `
-    ${pageHeading("الرواتب", "صرف رواتب الموظفين شهريًا مع الخصم من الخزينة وطباعة القسائم.", `<button class="button button-primary" data-action="new-payroll">＋ صرف رواتب شهر</button>`)}
+    ${pageHeading("الرواتب", "صرف رواتب الموظفين شهريًا مع الخصم من الخزينة وطباعة القسائم.", `<button class="button button-outline" data-action="export-table">تصدير Excel (CSV)</button><button class="button button-outline" data-action="print-report">طباعة / PDF</button><button class="button button-primary" data-action="new-payroll">＋ صرف رواتب شهر</button>`)}
     <div class="stock-summary"><div class="summary-chip"><span>رواتب هذا الشهر</span><strong>${money(sumOf(all.filter((r) => r.month === month), (r) => r.net))}</strong></div><div class="summary-chip"><span>رواتب هذه السنة</span><strong>${money(sumOf(all.filter((r) => String(r.month).startsWith(month.slice(0, 4))), (r) => r.net))}</strong></div><div class="summary-chip"><span>عدد القسائم</span><strong>${number(all.length)}</strong></div></div>
     <section class="card card-pad">${searchBar("ابحث باسم الموظف أو الشهر أو رقم القسيمة", rows.length, "قسيمة")}${rows.length ? `<div class="table-wrap"><table><thead><tr><th>القسيمة</th><th>الشهر</th><th>الموظف</th><th>الأساسي</th><th>البدلات</th><th>مكافأة</th><th>خصومات</th><th>الصافي</th><th>الخزينة</th><th>إجراءات</th></tr></thead><tbody>${rows.map((r) => `<tr><td class="table-primary">${escapeHTML(r.number)}</td><td>${escapeHTML(r.month)}</td><td>${escapeHTML(r.employeeName)}<span class="table-sub">${escapeHTML(r.jobTitle || "")}</span></td><td>${money(r.basic)}</td><td>${money(r.allowances)}</td><td>${money(r.bonus)}</td><td>${money(r.deductions)}</td><td>${money(r.net)}</td><td>${escapeHTML(r.cashboxName || "—")}</td><td><div class="row-actions"><button class="small-button" data-action="print-payslip" data-id="${escapeHTML(r.id)}">طباعة القسيمة</button><button class="small-button" data-action="cancel-payroll" data-id="${escapeHTML(r.id)}">إلغاء الصرف</button></div></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><strong>لا توجد رواتب مصروفة</strong>أضف الموظفين ثم اضغط «صرف رواتب شهر».</div>`}</section>`;
 }
@@ -2356,6 +2628,7 @@ async function savePayroll({ month, date, cashboxId, cashboxName, lines }) {
       counter += 1;
       transaction.set(refs[i], { ...line, number: `PAY-${String(counter).padStart(5, "0")}`, month, date, cashboxId, cashboxName, createdAt, createdBy: state.user.email });
     });
+    setTransactionAudit(transaction, "post", "payroll", month, month, `صرف ${number(lines.length)} قسيمة بإجمالي ${money(sumOf(lines, (line) => line.net))}`);
     transaction.set(counterRef, { value: counter }, { merge: true });
     transaction.update(cashRef, { balance: Number(cashSnap.data().balance ?? cashSnap.data().openingBalance ?? 0) - sumOf(lines, (l) => l.net) });
   });
@@ -2373,6 +2646,7 @@ async function cancelPayroll(id) {
       const cashSnap = cashRef ? await transaction.get(cashRef) : null;
       transaction.delete(ref);
       if (cashRef && cashSnap.exists()) transaction.update(cashRef, { balance: Number(cashSnap.data().balance ?? cashSnap.data().openingBalance ?? 0) + Number(snap.data().net || 0) });
+      setTransactionAudit(transaction, "cancel", "payroll", id, snap.data().number, `إلغاء راتب ${snap.data().employeeName} لشهر ${snap.data().month} بمبلغ ${money(snap.data().net)}`);
     });
     showToast("تم إلغاء الصرف وإعادة المبلغ للخزينة.");
   } catch (error) {
@@ -2401,7 +2675,31 @@ function openEntityManager(entity) {
 function startLiveSync() {
   state.unsubscribers.forEach((unsubscribe) => unsubscribe());
   state.unsubscribers = [];
-  for (const collectionName of Object.keys(state.collections)) {
+  const membershipUnsubscribe = onSnapshot(doc(db, "authorizedUsers", state.user.uid), (snapshot) => {
+    const role = snapshot.data()?.role;
+    if (!snapshot.exists() || !Object.hasOwn(roleLabels, role)) {
+      state.role = "";
+      signOut(auth);
+      return;
+    }
+    if (role !== state.role) {
+      state.role = role;
+      state.authorizedUsers = [];
+      if (!canManageData()) state.auditLogs = [];
+      const permittedCollections = new Set(collectionsForRole());
+      Object.keys(state.collections).forEach((name) => {
+        if (!permittedCollections.has(name)) state.collections[name] = [];
+      });
+      state.report = null;
+      state.statement = null;
+      modalRoot.innerHTML = "";
+      document.querySelector("#user-email").textContent = `${state.user.email || "مستخدم"} · ${roleLabels[role]}`;
+      startLiveSync();
+      setPage(state.page);
+    }
+  }, (error) => showToast(explainError(error), "error"));
+  state.unsubscribers.push(membershipUnsubscribe);
+  for (const collectionName of collectionsForRole()) {
     const unsubscribe = onSnapshot(collection(db, collectionName), (snapshot) => {
       state.collections[collectionName] = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
       scheduleRender();
@@ -2410,9 +2708,24 @@ function startLiveSync() {
     });
     state.unsubscribers.push(unsubscribe);
   }
+  if (state.role === "admin") {
+    const usersUnsubscribe = onSnapshot(collection(db, "authorizedUsers"), (snapshot) => {
+      state.authorizedUsers = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
+      scheduleRender();
+    }, (error) => showToast(explainError(error), "error"));
+    state.unsubscribers.push(usersUnsubscribe);
+  }
+  if (canManageData()) {
+    const auditQuery = query(collection(db, "auditLogs"), orderBy("occurredAt", "desc"), limit(250));
+    const auditUnsubscribe = onSnapshot(auditQuery, (snapshot) => {
+      state.auditLogs = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
+      scheduleRender();
+    }, (error) => showToast(explainError(error), "error"));
+    state.unsubscribers.push(auditUnsubscribe);
+  }
   const settingsUnsubscribe = onSnapshot(doc(db, "settings", "company"), (snapshot) => {
     if (snapshot.exists()) {
-      state.company = { ...state.company, ...snapshot.data() };
+      state.company = normalizeCompanySettings(snapshot.data());
       const local = readLocalTheme();
       if (state.company.theme && local?.scope !== "device") {
         writeLocalTheme({ scope: "shared", theme: sanitizeTheme(state.company.theme) });
@@ -2428,7 +2741,7 @@ async function refreshData() {
   const button = document.querySelector("#refresh-button");
   setLoading(button, true, "جارٍ التحديث...");
   try {
-    await Promise.all(Object.keys(state.collections).map(async (collectionName) => {
+    await Promise.all(collectionsForRole().map(async (collectionName) => {
       const snapshot = await getDocs(collection(db, collectionName));
       state.collections[collectionName] = snapshot.docs.map((entry) => ({ id: entry.id, ...entry.data() }));
     }));
@@ -2441,7 +2754,246 @@ async function refreshData() {
   }
 }
 
+function csvCell(value) {
+  const raw = String(value ?? "");
+  const trimmed = raw.trim();
+  const dangerous = /^[\s]*[=+@]/.test(raw) || trimmed.startsWith("-") && !/^-\d+(?:\.\d+)?$/.test(trimmed);
+  const text = dangerous ? `'${raw}` : raw;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function downloadCSV(rows, filename) {
+  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportCellValue(value, header) {
+  const raw = String(value ?? "").trim();
+  if (/كود|باركود|جوال|هاتف|رقم/.test(String(header || ""))) return raw;
+  const normalized = raw
+    .replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit)))
+    .replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)))
+    .replace(/[−]/g, "-")
+    .replace(/\s*ج\.م$/, "")
+    .replace(/٬/g, "")
+    .replace(/٫/g, ".")
+    .trim();
+  if (/^-?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d+)?$/.test(normalized)) return normalized.replace(/,/g, "");
+  return raw;
+}
+
+function exportVisibleTables() {
+  const tables = [...pageContent.querySelectorAll("table")];
+  if (!tables.length) {
+    showToast("لا يوجد جدول لتصديره في الصفحة الحالية.", "error");
+    return;
+  }
+  const rows = [];
+  tables.forEach((table, tableIndex) => {
+    if (tableIndex) rows.push([]);
+    const actionColumns = new Set();
+    [...table.rows].slice(1).forEach((row) => [...row.cells].forEach((cell, index) => {
+      if (cell.querySelector("button")) actionColumns.add(index);
+    }));
+    [...table.rows].forEach((row) => {
+      const cells = [...row.cells];
+      const filtered = cells.map((cell, index) => ({ cell, index })).filter(({ cell, index }) => {
+        const heading = table.tHead?.rows[0]?.cells[index]?.textContent.trim();
+        return !actionColumns.has(index) && !cell.querySelector("button") && heading !== "الإجراءات";
+      });
+      if (filtered.length) rows.push(filtered.map(({ cell, index }) => {
+        const text = cell.innerText.trim().replace(/\s*\n\s*/g, " · ");
+        const heading = table.tHead?.rows[0]?.cells[index]?.textContent.trim();
+        return exportCellValue(text, heading);
+      }));
+    });
+  });
+  if (!rows.length) {
+    showToast("لا توجد بيانات قابلة للتصدير.", "error");
+    return;
+  }
+  downloadCSV(rows, `daftar-${state.page}-${isoToday()}.csv`);
+}
+
+function exportAnalyticsData() {
+  const analytics = state.analytics || { from: `${new Date().getFullYear()}-01-01`, to: isoToday() };
+  const period = periodData(analytics.from, analytics.to);
+  const series = monthlySeries(monthKeysBetween(analytics.from, analytics.to), analytics.from, analytics.to);
+  const items = aggregateItems(analytics.from, analytics.to);
+  const customers = aggregateCustomers(analytics.from, analytics.to);
+  const rows = [
+    ["الفترة", analytics.from, analytics.to],
+    [],
+    ["البند", "القيمة"],
+    ["صافي المبيعات", period.salesNet],
+    ["مجمل الربح", period.grossProfit],
+    ["المصروفات", period.expensesNet],
+    ["الرواتب", period.payrollNet],
+    ["صافي الربح التقديري", period.netProfit],
+    ["صافي المشتريات", period.purchasesNet],
+    ["صافي الضريبة المستحقة", period.vatDue],
+    [],
+    ["الشهر", "المبيعات", "المشتريات", "المصروفات", "الرواتب", "صافي الربح"],
+    ...series.labels.map((label, index) => [label, series.sales[index], series.purchases[index], series.expenses[index], series.payroll[index], series.profit[index]]),
+    [],
+    ["الصنف", "الكود", "الكمية", "صافي المبيعات", "التكلفة", "الربح"],
+    ...items.map((item) => [item.name, item.code || "", item.qty, item.revenue, item.cost, item.profit]),
+    [],
+    ["العميل", "عدد الفواتير", "إجمالي المبيعات", "المرتجعات", "صافي المبيعات", "الآجل"],
+    ...customers.map((customer) => [customer.name, customer.count, customer.total, customer.returns, customer.net, customer.due]),
+  ];
+  downloadCSV(rows, `daftar-analytics-${analytics.from}-${analytics.to}.csv`);
+}
+
+function downloadImportTemplate() {
+  const entity = pageContent.querySelector("#csv-import-entity")?.value;
+  if (!["items", "customers"].includes(entity)) {
+    showToast("اختر الأصناف أو العملاء أولًا.", "error");
+    return;
+  }
+  const headers = entityConfig[entity].fields.map((field) => field.label);
+  downloadCSV([headers], `daftar-${entity}-template.csv`);
+}
+
+function parseCSV(text) {
+  const input = text.replace(/^\uFEFF/, "");
+  let delimiter = ",";
+  let quoted = false;
+  const counts = { ",": 0, ";": 0, "\t": 0 };
+  for (let index = 0; index < input.length && input[index] !== "\r" && input[index] !== "\n"; index += 1) {
+    if (input[index] === '"' && input[index + 1] === '"' && quoted) index += 1;
+    else if (input[index] === '"') quoted = !quoted;
+    else if (!quoted && Object.hasOwn(counts, input[index])) counts[input[index]] += 1;
+  }
+  delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = [];
+  let row = [];
+  let cell = "";
+  quoted = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (char === '"' && quoted && input[index + 1] === '"') {
+      cell += '"';
+      index += 1;
+    } else if (char === '"') {
+      quoted = !quoted;
+    } else if (char === delimiter && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && input[index + 1] === "\n") index += 1;
+      row.push(cell);
+      if (row.some((value) => value.trim())) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+  if (quoted) throw new Error("يوجد حقل نصي بعلامة اقتباس غير مغلقة في ملف CSV.");
+  row.push(cell);
+  if (row.some((value) => value.trim())) rows.push(row);
+  return { rows, delimiter };
+}
+
+function parseCSVNumber(value, field, rowNumber) {
+  const normalized = value.trim().replace(/[٠-٩]/g, (digit) => String("٠١٢٣٤٥٦٧٨٩".indexOf(digit))).replace(/[۰-۹]/g, (digit) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(digit)));
+  if (!/^-?(?:\d+|\d*\.\d+)$/.test(normalized)) throw new Error(`قيمة رقمية غير صالحة في الصف ${rowNumber}، الحقل «${field.label}». استخدم النقطة للفواصل العشرية.`);
+  const numberValue = Number(normalized);
+  if (!Number.isFinite(numberValue) || field.min !== undefined && numberValue < field.min || field.max !== undefined && numberValue > field.max) {
+    throw new Error(`القيمة خارج النطاق في الصف ${rowNumber}، الحقل «${field.label}».`);
+  }
+  return numberValue;
+}
+
+async function importMasterDataCSV(file, entity) {
+  if (!file || !canManageData()) return;
+  try {
+    if (!["items", "customers"].includes(entity)) throw new Error("الاستيراد متاح للأصناف والعملاء فقط.");
+    if (file.size > 5 * 1024 * 1024) throw new Error("حجم ملف CSV يتجاوز الحد المسموح (5 ميجابايت).");
+    const { rows } = parseCSV(await file.text());
+    if (rows.length < 2) throw new Error("الملف يجب أن يحتوي على صف عناوين وصف بيانات واحد على الأقل.");
+    if (rows.length - 1 > 400) throw new Error("الحد الأقصى 400 صف بيانات في الملف الواحد.");
+    const config = entityConfig[entity];
+    const fields = config.fields;
+    const headerMap = new Map(fields.flatMap((field) => [[field.key, field.key], [field.label, field.key]]));
+    const headers = rows[0].map((header) => header.trim());
+    if (headers.some((header) => !header || !headerMap.has(header))) throw new Error("تأكد من عناوين الأعمدة؛ استخدم قالب الاستيراد دون تغيير العناوين.");
+    const keys = headers.map((header) => headerMap.get(header));
+    if (new Set(keys).size !== keys.length) throw new Error("يوجد عمود مكرر في صف العناوين.");
+    const existingCodes = new Set(list(config.collection).map((row) => String(row.code || "").trim().toLocaleLowerCase()).filter(Boolean));
+    const importedCodes = new Set();
+    const records = [];
+    let skipped = 0;
+    const validationErrors = [];
+    rows.slice(1).forEach((cells, index) => {
+      const rowNumber = index + 2;
+      if (cells.length > headers.length && cells.slice(headers.length).some((value) => value.trim())) {
+        validationErrors.push(`الصف ${rowNumber}: عدد الأعمدة أكبر من صف العناوين.`);
+        return;
+      }
+      const row = Object.fromEntries(keys.map((key, column) => [key, String(cells[column] ?? "").trim()]));
+      const data = {};
+      try {
+        for (const field of fields) {
+          let value = row[field.key] ?? "";
+          if (!value) {
+            if (field.required) throw new Error(`الحقل «${field.label}» مطلوب.`);
+            value = field.default ?? "";
+          }
+          if (field.type === "number") {
+            data[field.key] = value === "" ? 0 : parseCSVNumber(value, field, rowNumber);
+          } else if (field.type === "checkbox") {
+            const normalized = String(value).trim().toLowerCase();
+            if (!normalized) data[field.key] = Boolean(field.default);
+            else if (["true", "1", "yes", "نعم"].includes(normalized)) data[field.key] = true;
+            else if (["false", "0", "no", "لا"].includes(normalized)) data[field.key] = false;
+            else throw new Error(`قيمة غير صالحة في الحقل «${field.label}»؛ استخدم نعم أو لا.`);
+          } else {
+            data[field.key] = String(value);
+          }
+        }
+        const code = String(data.code || "").trim();
+        const normalizedCode = code.toLocaleLowerCase();
+        if (!code) throw new Error("كود السجل مطلوب.");
+        if (existingCodes.has(normalizedCode) || importedCodes.has(normalizedCode)) {
+          skipped += 1;
+          return;
+        }
+        existingCodes.add(normalizedCode);
+        importedCodes.add(normalizedCode);
+        if (entity === "items") {
+          data.quantity = Number(data.quantity || 0);
+          data.active = true;
+        } else {
+          data.balance = Number(data.openingBalance || 0);
+          data.active = true;
+        }
+        records.push(data);
+      } catch (error) {
+        validationErrors.push(`الصف ${rowNumber}: ${error.message}`);
+      }
+    });
+    if (validationErrors.length) throw new Error(`لم يتم استيراد أي بيانات. ${validationErrors.slice(0, 8).join(" ")}`);
+    if (!records.length) throw new Error(`لم تُضف أي سجلات جديدة؛ تم تخطي ${skipped} سجل بسبب تكرار الكود.`);
+    if (!window.confirm(`سيتم إضافة ${records.length} ${config.title} جديدة وتخطي ${skipped} سجل مكرر. لن تُعدّل السجلات الموجودة. هل تريد المتابعة؟`)) return;
+    const batch = writeBatch(db);
+    records.forEach((data) => batch.set(doc(collection(db, config.collection)), data));
+    setBatchAudit(batch, "create", config.collection, "csv-import", "", `استيراد ${number(records.length)} ${config.title} من CSV؛ تخطي ${number(skipped)} مكرر`);
+    await batch.commit();
+    showToast(`تم استيراد ${number(records.length)} سجل${skipped ? `، وتخطي ${number(skipped)} مكرر` : ""}.`);
+  } catch (error) {
+    showToast(explainError(error), "error");
+  }
+}
+
 async function exportData() {
+  if (!canManageData()) return;
   try {
     const countersSnap = await getDocs(collection(db, "counters"));
     const payload = {
@@ -2463,7 +3015,7 @@ async function exportData() {
 }
 
 async function importData(file) {
-  if (!file) return;
+  if (!file || !canManageData()) return;
   try {
     const payload = JSON.parse(await file.text());
     if (!payload.collections || !window.confirm("سيتم دمج بيانات النسخة داخل قاعدة Firestore الحالية. هل تريد المتابعة؟")) return;
@@ -2484,7 +3036,10 @@ async function importData(file) {
       const currentValues = Object.fromEntries(current.docs.map((entry) => [entry.id, Number(entry.data().value || 0)]));
       await Promise.all(["sales", "purchases", "payments", "expenses", "salesReturns", "purchaseReturns", "payroll"].filter((id) => payload.counters[id]).map((id) => setDoc(doc(db, "counters", id), { value: Math.max(currentValues[id] || 0, Number(payload.counters[id].value || 0)) }, { merge: true })));
     }
-    if (payload.company) await setDoc(doc(db, "settings", "company"), payload.company, { merge: true });
+    const auditBatch = writeBatch(db);
+    if (payload.company) auditBatch.set(doc(db, "settings", "company"), normalizeCompanySettings(payload.company), { merge: true });
+    setBatchAudit(auditBatch, "backup", "backup", "restore", "", `استعادة ${number(entries.length)} سجل من نسخة احتياطية`);
+    await auditBatch.commit();
     showToast("تم استعادة بيانات النسخة.");
   } catch (error) {
     showToast(explainError(error), "error");
@@ -2503,6 +3058,13 @@ async function checkAuthorization(user) {
     await signOut(auth);
     return false;
   }
+  const role = membership.data().role;
+  if (!Object.hasOwn(roleLabels, role)) {
+    loginMessage.textContent = "حسابك معتمد لكن لم يُعيّن له دور صالح. اطلب من مدير النظام ضبط الدور من قسم إدارة المستخدمين.";
+    await signOut(auth);
+    return false;
+  }
+  state.role = role;
   return true;
 }
 
@@ -2552,7 +3114,7 @@ applyTheme(effectiveTheme());
 bindStatementEvents();
 bindAnalyticsEvents();
 
-document.querySelector("#today-label").textContent = new Intl.DateTimeFormat("ar-SA", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
+document.querySelector("#today-label").textContent = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long", year: "numeric" }).format(new Date());
 
 if (!isConfigured) {
   loginMessage.textContent = "أضف إعدادات Firebase إلى firebase-config.js أولًا، ثم أعد تحميل الصفحة.";
@@ -2561,11 +3123,14 @@ if (!isConfigured) {
   onAuthStateChanged(auth, async (user) => {
     if (!user) {
       state.user = null;
+      state.role = "";
+      state.authorizedUsers = [];
       state.themeDirty = false;
       state.themeDraft = null;
       applyTheme(effectiveTheme());
       syncThemeBar();
       Object.keys(state.collections).forEach((key) => { state.collections[key] = []; });
+      state.auditLogs = [];
       state.report = null;
       modalRoot.innerHTML = "";
       state.unsubscribers.forEach((unsubscribe) => unsubscribe());
@@ -2578,7 +3143,7 @@ if (!isConfigured) {
       const allowed = await checkAuthorization(user);
       if (!allowed) return;
       state.user = user;
-      document.querySelector("#user-email").textContent = user.email || "مستخدم";
+      document.querySelector("#user-email").textContent = `${user.email || "مستخدم"} · ${roleLabels[state.role]}`;
       loginScreen.classList.add("is-hidden");
       appShell.classList.remove("is-hidden");
       startLiveSync();
