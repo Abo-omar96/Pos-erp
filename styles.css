@@ -318,7 +318,8 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-light); 
 .login-card input { min-height: 46px; }
 .form-message { overflow-wrap: anywhere; }
 @media print {
-  .sidebar, .topbar, .page-heading, .report-controls { display: none !important; }
+  .sidebar, .topbar, .report-controls, .page-heading .heading-actions { display: none !important; }
+  .page-heading { display: flex !important; }
   .app-shell { display: block; }
   .page-content { max-width: none; padding: 0; }
   .card { border: 0; box-shadow: none; }
