@@ -1,19 +1,212 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAuthorizedUser() {
-      return request.auth != null
-        && exists(/databases/$(database)/documents/authorizedUsers/$(request.auth.uid));
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function membershipPath() {
+      return /databases/$(database)/documents/authorizedUsers/$(request.auth.uid);
+    }
+
+    function hasRole(role) {
+      return signedIn()
+        && exists(membershipPath())
+        && get(membershipPath()).data.role == role;
+    }
+
+    function isAdmin() {
+      return hasRole("admin");
+    }
+
+    function isAccountant() {
+      return hasRole("accountant");
+    }
+
+    function isBusinessUser() {
+      return isAdmin() || isAccountant();
+    }
+
+    function canRecordSales() {
+      return isBusinessUser() || hasRole("cashier") || hasRole("seller");
+    }
+
+    function canRecordCash() {
+      return isBusinessUser() || hasRole("cashier");
+    }
+
+    function canReadSalesData() {
+      return canRecordSales();
+    }
+
+    function canReadCashData() {
+      return canRecordCash();
+    }
+
+    function canUseCounter(counterId) {
+      return isBusinessUser()
+        || (canRecordSales() && counterId in ["sales", "salesReturns"])
+        || (canRecordCash() && counterId in ["payments", "expenses"]);
+    }
+
+    function isNextCounterValue() {
+      return request.resource.data.keys().hasOnly(["value"])
+        && request.resource.data.value is int
+        && request.resource.data.value > 0;
+    }
+
+    function isCounterIncrement() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(["value"])
+        && request.resource.data.value is int
+        && request.resource.data.value == resource.data.value + 1;
     }
 
     match /authorizedUsers/{userId} {
-      allow read: if request.auth != null && request.auth.uid == userId;
-      allow write: if false;
+      allow read: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow create, update: if isAdmin()
+        && request.auth.uid != userId
+        && request.resource.data.keys().hasOnly(["email", "role"])
+        && request.resource.data.role in ["admin", "accountant", "cashier", "seller"];
+      allow delete: if isAdmin() && request.auth.uid != userId;
     }
 
-    match /{collection}/{document=**} {
-      allow read, write: if isAuthorizedUser()
-        && collection != "authorizedUsers";
+    match /auditLogs/{eventId} {
+      allow read: if isBusinessUser();
+      allow create: if signedIn()
+        && exists(membershipPath())
+        && request.resource.data.keys().hasAll([
+          "actorUid", "actorEmail", "actorRole", "action", "targetCollection",
+          "targetId", "targetNumber", "description", "occurredAt"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "actorUid", "actorEmail", "actorRole", "action", "targetCollection",
+          "targetId", "targetNumber", "description", "occurredAt"
+        ])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.actorEmail == request.auth.token.email
+        && request.resource.data.actorRole == get(membershipPath()).data.role
+        && request.resource.data.actorRole in ["admin", "accountant", "cashier", "seller"]
+        && request.resource.data.actorEmail is string
+        && request.resource.data.action in ["create", "update", "delete", "post", "cancel", "settings", "access", "backup"]
+        && request.resource.data.targetCollection in [
+          "items", "customers", "suppliers", "warehouses", "cashboxes", "expenseTypes",
+          "sales", "purchases", "payments", "expenses", "stockMoves", "returns",
+          "employees", "payroll", "settings", "authorizedUsers", "backup"
+        ]
+        && request.resource.data.targetId is string
+        && request.resource.data.targetId.size() <= 1500
+        && request.resource.data.targetNumber is string
+        && request.resource.data.targetNumber.size() <= 100
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 500
+        && request.resource.data.occurredAt == request.time;
+      allow update, delete: if false;
+    }
+
+    match /settings/{settingId} {
+      allow read: if settingId == "company"
+        && signedIn()
+        && (isAdmin() || isAccountant() || hasRole("cashier") || hasRole("seller"));
+      allow write: if isBusinessUser();
+    }
+
+    match /items/{itemId} {
+      allow read: if isBusinessUser() || canRecordSales();
+      allow create, delete: if isBusinessUser();
+      allow update: if isBusinessUser()
+        || (canRecordSales()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["quantity", "costPrice"])
+          && request.resource.data.quantity is number
+          && request.resource.data.quantity >= 0
+          && request.resource.data.costPrice is number
+          && request.resource.data.costPrice >= 0);
+    }
+
+    match /customers/{customerId} {
+      allow read: if isBusinessUser() || canRecordSales();
+      allow create, delete: if isBusinessUser();
+      allow update: if isBusinessUser()
+        || (canRecordSales()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["balance"])
+          && request.resource.data.balance is number);
+    }
+
+    match /suppliers/{supplierId} {
+      allow read: if isBusinessUser() || canReadCashData();
+      allow create, delete: if isBusinessUser();
+      allow update: if isBusinessUser()
+        || (canReadCashData()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["balance"])
+          && request.resource.data.balance is number);
+    }
+
+    match /warehouses/{warehouseId} {
+      allow read: if isBusinessUser() || canRecordSales() || canRecordCash();
+      allow write: if isBusinessUser();
+    }
+
+    match /cashboxes/{cashboxId} {
+      allow read: if isBusinessUser() || canRecordSales() || canRecordCash();
+      allow create, delete: if isBusinessUser();
+      allow update: if isBusinessUser()
+        || ((canRecordSales() || canRecordCash())
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["balance"])
+          && request.resource.data.balance is number);
+    }
+
+    match /expenseTypes/{expenseTypeId} {
+      allow read: if isBusinessUser() || canRecordCash();
+      allow write: if isBusinessUser();
+    }
+
+    match /sales/{saleId} {
+      allow read: if canReadSalesData();
+      allow create: if canRecordSales();
+      allow update, delete: if isBusinessUser();
+    }
+
+    match /purchases/{purchaseId} {
+      allow read, write: if isBusinessUser();
+    }
+
+    match /returns/{returnId} {
+      allow read: if canReadSalesData();
+      allow create: if isBusinessUser()
+        || (canRecordSales() && request.resource.data.kind == "sales");
+      allow update, delete: if isBusinessUser();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isBusinessUser() || canReadCashData();
+      allow create: if canRecordCash();
+      allow update, delete: if isBusinessUser();
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isBusinessUser() || canReadCashData();
+      allow create: if canRecordCash();
+      allow update, delete: if isBusinessUser();
+    }
+
+    match /stockMoves/{moveId} {
+      allow read: if isBusinessUser();
+      allow create: if canRecordSales();
+      allow update, delete: if isBusinessUser();
+    }
+
+    match /employees/{employeeId} {
+      allow read, write: if isBusinessUser();
+    }
+
+    match /payroll/{payrollId} {
+      allow read, write: if isBusinessUser();
+    }
+
+    match /counters/{counterId} {
+      allow read: if isBusinessUser() || canRecordSales() || canRecordCash();
+      allow create: if canUseCounter(counterId) && isNextCounterValue();
+      allow update: if canUseCounter(counterId) && isCounterIncrement();
+      allow delete: if isBusinessUser();
     }
 
     match /{document=**} {
